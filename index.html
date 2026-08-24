@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- ══ Inline license limits — runs before any JS file, cannot be overridden ══ -->
+  <script>
+    // Version stamp — bump this with every release
+    window._APP_VERSION = '21';
+
+    // Self-contained license check — does NOT depend on license.js
+    window._isLicensed = (function () {
+      try {
+        var raw = (localStorage.getItem('tyf_license_key') || '').replace(/[\s\r\n]+/g, '');
+        var d   = JSON.parse(atob(raw));
+        return !!(d && d.n && d.h && typeof d.h === 'string' && d.h.length === 64);
+      } catch (e) { return false; }
+    }());
+
+    // Hard limits — single source of truth for entire app
+    window._LIMITS = { MAX_MEMBERS: 20, MAX_MONTHLY_FEE: 1000, MAX_GUEST_FEE: 1000 };
+
+    // Global guard functions — called from monthly.js, guestplay.js, members.js
+    window._checkMonthlyFee = function (amount) {
+      if (window._isLicensed) return null;
+      amount = parseFloat(amount) || 0;
+      if (amount > window._LIMITS.MAX_MONTHLY_FEE) {
+        return 'Unlicensed limit: monthly fee/payment cannot exceed ₹' + window._LIMITS.MAX_MONTHLY_FEE + '.\nYou entered ₹' + amount.toFixed(2) + '.\nActivate a license to remove this restriction.';
+      }
+      return null;
+    };
+
+    window._checkGuestFee = function (amount) {
+      if (window._isLicensed) return null;
+      amount = parseFloat(amount) || 0;
+      if (amount > window._LIMITS.MAX_GUEST_FEE) {
+        return 'Unlicensed limit: guest fee/payment cannot exceed ₹' + window._LIMITS.MAX_GUEST_FEE + '.\nYou entered ₹' + amount.toFixed(2) + '.\nActivate a license to remove this restriction.';
+      }
+      return null;
+    };
+
+    window._checkMemberLimit = async function () {
+      if (window._isLicensed) return null;
+      try {
+        // Count active members directly from IndexedDB
+        var count = await new Promise(function (resolve) {
+          var req = indexedDB.open('TrackYourFitness');
+          req.onsuccess = function (e) {
+            var db = e.target.result;
+            if (!db.objectStoreNames.contains('members')) { resolve(0); return; }
+            var tx    = db.transaction('members', 'readonly');
+            var store = tx.objectStore('members');
+            var all   = store.getAll();
+            all.onsuccess = function () {
+              var active = (all.result || []).filter(function (m) { return m.status !== 'inactive'; });
+              resolve(active.length);
+            };
+            all.onerror = function () { resolve(0); };
+          };
+          req.onerror = function () { resolve(0); };
+        });
+        if (count >= window._LIMITS.MAX_MEMBERS) {
+          return 'Unlicensed limit reached: max ' + window._LIMITS.MAX_MEMBERS + ' active members.\nActivate a license to add more.';
+        }
+      } catch (e) {}
+      return null;
+    };
+  </script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1f15">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Track Your Fitness</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<header class="app-header">
+  <span class="header-icon">🏋️</span>
+  <h1 id="app-name-header">Track Your Fitness</h1>
+  <button class="btn-icon" id="sync-btn" title="Sync now" style="font-size:1.3rem;color:#fff;opacity:0.8;" hidden>🔄</button>
+</header>
+
+<!-- License banner (shown when unlicensed) -->
+<div id="license-banner" class="license-banner">
+  <span>⚠️ Unlicensed — limited to 20 members &amp; ₹1000 max fee</span>
+</div>
+
+<!-- ══ Monthly Collection ══════════════════════════════ -->
+<main id="monthly-screen" class="screen">
+  <div class="section-header">
+    <span class="screen-title">Monthly collection</span>
+  </div>
+  <div class="filter-bar">
+    <div class="date-picker-wrap"><input type="date" id="monthly-ref-date" class="date-picker-hidden"><div class="date-picker-display" data-for="monthly-ref-date">Select date</div></div>
+    <input type="text" id="monthly-search" placeholder="Search member…">
+  </div>
+  <div class="filter-row">
+    <label><input type="checkbox" id="monthly-filter-unpaid"> Unpaid only</label>
+  </div>
+  <div id="monthly-list"></div>
+</main>
+
+<!-- ══ Sessions ══════════════════════════════════════ -->
+<main id="guest-screen" class="screen" hidden>
+  <div class="section-header">
+    <span class="screen-title">Sessions</span>
+  </div>
+  <div class="filter-bar">
+    <div class="date-picker-wrap"><input type="date" id="guest-date" class="date-picker-hidden"><div class="date-picker-display" data-for="guest-date">Select date</div></div>
+    <input type="text" id="guest-search" placeholder="Search member…">
+  </div>
+  <div id="guest-list"></div>
+</main>
+
+<!-- ══ Members ════════════════════════════════════════ -->
+<main id="members-screen" class="screen" hidden>
+  <div class="section-header">
+    <span class="screen-title">Members</span>
+    <div style="display:flex;gap:6px;">
+      <button class="btn btn-sm btn-secondary" id="members-export-btn">Export</button>
+      <button class="btn btn-sm btn-secondary" id="members-import-btn">Import</button>
+      <input type="file" id="members-import-file" accept=".csv" hidden>
+      <button class="btn btn-primary" id="add-member-btn">+ Add</button>
+    </div>
+  </div>
+  <input type="text" id="member-search" placeholder="Search members…" class="search-input">
+  <div class="form-container" id="member-form-container" hidden>
+    <div class="form-title" id="member-form-title">Add member</div>
+    <form id="member-form" novalidate>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="member-name">Full name *</label>
+          <input type="text" id="member-name" required>
+          <div class="error-message" id="member-name-error"></div>
+        </div>
+        <div class="form-group">
+          <label for="member-mobile">Mobile (10 digits) *</label>
+          <input type="tel" id="member-mobile" maxlength="10" inputmode="numeric">
+          <div class="error-message" id="member-mobile-error"></div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="member-notes">Notes</label>
+        <textarea id="member-notes" rows="2"></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary" onclick="
+  var isEdit = document.getElementById('member-form-title').textContent.toLowerCase().includes('edit');
+  if(!isEdit){
+    if(!window._isLicensed){
+      var req=indexedDB.open('TrackYourFitness');
+      req.onsuccess=function(e){
+        var db=e.target.result;
+        if(!db.objectStoreNames.contains('members')){return;}
+        var tx=db.transaction('members','readonly');
+        var all=tx.objectStore('members').getAll();
+        all.onsuccess=function(){
+          var active=(all.result||[]).filter(function(m){return m.status!=='inactive';});
+          if(active.length>=20){
+            alert('Unlicensed limit: max 20 active members.\nActivate a license to add more.');
+          }
+        };
+      };
+    }
+  }
+">Save</button>
+        <button type="button" class="btn btn-secondary" id="member-cancel-btn">Cancel</button>
+      </div>
+    </form>
+  </div>
+  <div id="member-list"></div>
+</main>
+
+<!-- ══ Contributions ══════════════════════════════════ -->
+<main id="contributions-screen" class="screen" hidden>
+  <div class="section-header">
+    <span class="screen-title">Monthly fees</span>
+  </div>
+
+  <!-- Section 1: Bulk apply fee -->
+  <div class="bulk-section">
+    <div class="bulk-section-title">Bulk apply fee</div>
+
+    <!-- Section 1: Date + fee + due day -->
+    <div class="form-row">
+      <div class="form-group" style="margin-bottom:0;">
+        <label for="bulk-activation-date">Effective from *</label>
+        <div class="date-picker-wrap"><input type="date" id="bulk-activation-date" class="date-picker-hidden"><div class="date-picker-display" data-for="bulk-activation-date">Select date</div></div>
+      </div>
+      <div class="form-group" style="margin-bottom:0;">
+        <label for="bulk-fee-amount">Monthly fee (₹) *</label>
+        <input type="number" id="bulk-fee-amount" min="1" step="0.01" inputmode="decimal" placeholder="e.g. 500">
+      </div>
+      <div class="form-group" style="margin-bottom:0;">
+        <label for="bulk-due-day">Due day</label>
+        <input type="number" id="bulk-due-day" min="1" max="28" value="1" style="width:100%;">
+      </div>
+    </div>
+
+    <!-- Section 2: Member search + select -->
+    <input type="text" id="bulk-member-search" placeholder="Search members to add…" class="search-input">
+    <div class="bulk-select-all-row">
+      <label><input type="checkbox" id="bulk-select-all"> Select all visible</label>
+      <span id="bulk-selected-count" class="bulk-count">No members selected</span>
+    </div>
+    <div id="bulk-member-list" class="bulk-member-list"></div>
+
+    <!-- Section 3: Apply -->
+    <div class="error-message" id="bulk-error"></div>
+    <div class="success-msg bulk-success-msg" id="bulk-success-msg" hidden></div>
+    <button class="btn btn-primary" id="bulk-apply-btn" style="width:100%;">Apply fee to selected members</button>
+  </div>
+
+  <!-- Individual enrollment form -->
+  <div class="form-container" id="enroll-form-container" hidden>
+    <div class="form-title" id="enroll-form-title">Enroll in monthly</div>
+    <div id="enroll-member-name" style="font-weight:600;margin-bottom:10px;color:var(--primary-light);"></div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="enroll-monthly-fee">Monthly fee (₹) *</label>
+        <input type="number" id="enroll-monthly-fee" min="1" step="0.01" inputmode="decimal">
+      </div>
+      <div class="form-group">
+        <label for="enroll-guest-fee">session fee (₹)</label>
+        <input type="number" id="enroll-guest-fee" min="0" step="0.01" inputmode="decimal" placeholder="Leave blank for default">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="enroll-activation-date">Activation date *</label>
+        <div class="date-picker-wrap"><input type="date" id="enroll-activation-date" class="date-picker-hidden"><div class="date-picker-display" data-for="enroll-activation-date">Select date</div></div>
+      </div>
+      <div class="form-group">
+        <label for="enroll-due-day">Due day (1–28)</label>
+        <input type="number" id="enroll-due-day" min="1" max="28" value="1">
+      </div>
+    </div>
+    <div class="form-group">
+      <label for="enroll-notes">Notes</label>
+      <textarea id="enroll-notes" rows="2"></textarea>
+    </div>
+    <div class="error-message" id="enroll-error" style="margin-bottom:6px;"></div>
+    <div class="form-actions">
+      <button type="button" class="btn btn-primary" id="enroll-save-btn">Save</button>
+      <button type="button" class="btn btn-secondary" id="enroll-cancel-btn">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Individual member list -->
+  <div class="section-header" style="margin-top:4px;">
+    <span class="screen-title" style="font-size:0.75rem;">Current enrollments</span>
+  </div>
+  <input type="text" id="contrib-search" placeholder="Search enrolled members…" class="search-input">
+  <div id="contrib-list"></div>
+</main>
+
+<!-- ══ Expenses ═══════════════════════════════════════ -->
+<main id="expenses-screen" class="screen" hidden>
+  <div class="section-header">
+    <span class="screen-title">Expenses</span>
+    <button class="btn btn-primary" id="add-expense-btn">+ Add</button>
+  </div>
+  <div class="filter-bar">
+    <div class="date-picker-wrap"><input type="date" id="expense-filter-start" class="date-picker-hidden"><div class="date-picker-display" data-for="expense-filter-start">Select date</div></div>
+    <div class="date-picker-wrap"><input type="date" id="expense-filter-end" class="date-picker-hidden"><div class="date-picker-display" data-for="expense-filter-end">Select date</div></div>
+  </div>
+  <input type="text" id="expense-search" placeholder="Search by category or notes…" class="search-input">
+
+  <div class="form-container" id="expense-form-container" hidden>
+    <div class="form-title" id="expense-form-title">Add expense</div>
+    <form id="expense-form" novalidate>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="expense-amount">Amount (₹) *</label>
+          <input type="number" id="expense-amount" min="0.01" step="0.01" inputmode="decimal">
+          <div class="error-message" id="expense-amount-error"></div>
+        </div>
+        <div class="form-group">
+          <label for="expense-date">Date *</label>
+          <div class="date-picker-wrap"><input type="date" id="expense-date" class="date-picker-hidden"><div class="date-picker-display" data-for="expense-date">Select date</div></div>
+          <div class="error-message" id="expense-date-error"></div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="expense-category">Category</label>
+        <input type="text" id="expense-category" placeholder="e.g. Supplements, Gym rent, Equipment…" list="expense-category-suggestions">
+        <datalist id="expense-category-suggestions">
+          <option value="Supplements">
+          <option value="Gym rent">
+          <option value="Equipment">
+          <option value="Maintenance">
+          <option value="Tournament">
+          <option value="Miscellaneous">
+        </datalist>
+      </div>
+      <div class="form-group">
+        <label for="expense-notes">Notes</label>
+        <textarea id="expense-notes" rows="2" placeholder="Additional details…"></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Save</button>
+        <button type="button" class="btn btn-secondary" id="expense-cancel-btn">Cancel</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="expense-list"></div>
+</main>
+
+<!-- ══ History ════════════════════════════════════════ -->
+<main id="history-screen" class="screen" hidden>
+  <div class="section-header">
+    <span class="screen-title">Activity history</span>
+  </div>
+  <div class="filter-bar">
+    <div class="date-picker-wrap"><input type="date" id="history-start" class="date-picker-hidden"><div class="date-picker-display" data-for="history-start">Select date</div></div>
+    <div class="date-picker-wrap"><input type="date" id="history-end" class="date-picker-hidden"><div class="date-picker-display" data-for="history-end">Select date</div></div>
+  </div>
+  <div class="filter-bar">
+    <input type="text" id="history-search" placeholder="Filter by member…">
+    <select id="history-type-filter">
+      <option value="all">All records</option>
+      <option value="monthly_fee">Monthly fee records</option>
+      <option value="monthly_payment">Monthly payments</option>
+      <option value="guest_session">Guest session records</option>
+      <option value="guest_payment">Guest payments</option>
+    </select>
+  </div>
+  <div id="history-list"></div>
+</main>
+
+<!-- ══ Reports ════════════════════════════════════════ -->
+<main id="reports-screen" class="screen" hidden>
+  <div class="section-header">
+    <span class="screen-title">Reports</span>
+    <button class="btn btn-sm btn-secondary" id="report-print-btn">🖨️ Print</button>
+  </div>
+
+  <!-- Report type tabs -->
+  <div class="report-tabs">
+    <button class="report-tab-btn active" data-tab="daywise">Day-wise</button>
+    <button class="report-tab-btn" data-tab="memberwise">Member-wise</button>
+    <button class="report-tab-btn" data-tab="outstanding">Outstanding</button>
+    <button class="report-tab-btn" data-tab="balance">Balance</button>
+  </div>
+
+  <!-- Tab panels — filters live INSIDE each panel so they never overlap the tab bar -->
+  <div class="report-tab-panel" data-tab="daywise">
+    <div class="filter-bar">
+      <div class="date-picker-wrap"><input type="date" id="report-start" class="date-picker-hidden"><div class="date-picker-display" data-for="report-start">Select date</div></div>
+      <div class="date-picker-wrap"><input type="date" id="report-end" class="date-picker-hidden"><div class="date-picker-display" data-for="report-end">Select date</div></div>
+    </div>
+    <input type="text" id="report-search" placeholder="Filter by member…" class="search-input">
+    <div id="report-output-daywise"></div>
+  </div>
+
+  <div class="report-tab-panel" data-tab="memberwise" hidden>
+    <div class="filter-bar">
+      <div class="date-picker-wrap"><input type="date" id="report-start-mw" class="date-picker-hidden"><div class="date-picker-display" data-for="report-start-mw">Select date</div></div>
+      <div class="date-picker-wrap"><input type="date" id="report-end-mw" class="date-picker-hidden"><div class="date-picker-display" data-for="report-end-mw">Select date</div></div>
+    </div>
+    <input type="text" id="report-search-mw" placeholder="Filter by member…" class="search-input">
+    <div id="report-output-memberwise"></div>
+  </div>
+
+  <div class="report-tab-panel" data-tab="outstanding" hidden>
+    <div class="filter-bar">
+      <div class="date-picker-wrap"><input type="date" id="report-outstanding-date" class="date-picker-hidden"><div class="date-picker-display" data-for="report-outstanding-date">Select date</div></div>
+      <span style="font-size:0.8rem;color:var(--text2);align-self:center;white-space:nowrap;">As of date</span>
+    </div>
+    <input type="text" id="report-search-os" placeholder="Filter by member…" class="search-input">
+    <div id="report-output-outstanding"></div>
+  </div>
+
+  <div class="report-tab-panel" data-tab="balance" hidden>
+    <div class="filter-bar">
+      <div class="date-picker-wrap"><input type="date" id="report-start-balance" class="date-picker-hidden"><div class="date-picker-display" data-for="report-start-balance">Select date</div></div>
+      <div class="date-picker-wrap"><input type="date" id="report-end-balance" class="date-picker-hidden"><div class="date-picker-display" data-for="report-end-balance">Select date</div></div>
+    </div>
+    <div id="report-output-balance"></div>
+  </div>
+</main>
+
+<!-- ══ Settings ═══════════════════════════════════════ -->
+<main id="settings-screen" class="screen" hidden>
+  <span class="screen-title">Settings</span>
+  <div class="settings-section">
+    <h3>General</h3>
+    <div class="form-group">
+      <label for="settings-app-name">Club / app name</label>
+      <input type="text" id="settings-app-name" maxlength="50">
+    </div>
+    <div class="form-group">
+      <label for="settings-upi-id">UPI ID (for QR codes) *</label>
+      <input type="text" id="settings-upi-id" maxlength="45" placeholder="yourname@upi">
+    </div>
+    <div class="form-group">
+      <label for="settings-default-guest-fee">Default session fee (₹)</label>
+      <input type="number" id="settings-default-guest-fee" min="1" step="0.01" inputmode="decimal" placeholder="50">
+      <div class="loan-notes">Applied when no member-specific guest fee is set</div>
+    </div>
+    <div class="form-group">
+      <label for="theme-select">Theme</label>
+      <select id="theme-select">
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
+        <option value="forest">Forest (green)</option>
+        <option value="sunset">Sunset (amber)</option>
+      </select>
+    </div>
+    <div class="error-message" id="settings-error" style="margin-top:6px;"></div>
+    <button class="btn btn-primary" id="settings-save-btn" style="margin-top:10px;width:100%;">Save settings</button>
+    <div class="success-msg" id="settings-save-msg" hidden>Settings saved!</div>
+  </div>
+  <div class="settings-section">
+    <h3>WhatsApp notifications</h3>
+    <div class="toggle-row">
+      <span class="toggle-label">Monthly confirmation <span class="loan-notes">(off by default)</span></span>
+      <label class="toggle-switch"><input type="checkbox" id="wa-toggle-monthly"><span class="toggle-slider"></span></label>
+    </div>
+    <div class="toggle-row">
+      <span class="toggle-label">Session confirmation <span class="loan-notes">(off by default)</span></span>
+      <label class="toggle-switch"><input type="checkbox" id="wa-toggle-guest"><span class="toggle-slider"></span></label>
+    </div>
+    <div class="form-group" style="margin-top:10px;">
+      <label>Monthly confirmation template</label>
+      <textarea id="wa-tpl-monthly-confirm" rows="3"></textarea>
+      <div class="loan-notes">Variables: {memberName} {amount} {date} {balance}</div>
+    </div>
+    <div class="form-group">
+      <label>Monthly reminder template</label>
+      <textarea id="wa-tpl-monthly-reminder" rows="3"></textarea>
+      <div class="loan-notes">Variables: {memberName} {balance} {fee}</div>
+    </div>
+    <div class="form-group">
+      <label>Session confirmation template</label>
+      <textarea id="wa-tpl-guest-confirm" rows="3"></textarea>
+      <div class="loan-notes">Variables: {memberName} {amount} {date}</div>
+    </div>
+    <button class="btn btn-primary" id="wa-save-btn" style="width:100%;">Save WhatsApp settings</button>
+    <div class="success-msg" id="wa-save-msg" hidden>Saved!</div>
+  </div>
+  <div class="settings-section">
+    <h3>Backup reminder</h3>
+    <div class="form-group">
+      <label for="backup-frequency">Remind every</label>
+      <select id="backup-frequency">
+        <option value="0">Never</option>
+        <option value="3">3 days</option>
+        <option value="7">7 days</option>
+        <option value="14">14 days</option>
+        <option value="30">30 days</option>
+      </select>
+    </div>
+  </div>
+  <div class="settings-section">
+    <h3>License</h3>
+    <div id="license-status-section">
+      <p id="license-status-text" style="margin-bottom:8px;font-size:0.9rem;color:var(--text2);">Status: Unlicensed</p>
+    </div>
+    <div class="form-group">
+      <label for="license-key-input">License key</label>
+      <textarea id="license-key-input" rows="3" placeholder="Paste your license key here…"></textarea>
+    </div>
+    <div class="error-message" id="license-error" style="margin-bottom:6px;"></div>
+    <div class="success-msg" id="license-success-msg" hidden></div>
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-primary" id="license-activate-btn" style="flex:1;">Activate</button>
+      <button class="btn btn-secondary" id="license-deactivate-btn" style="flex:1;" hidden>Deactivate</button>
+    </div>
+    <div class="loan-notes" style="margin-top:8px;">
+      Without a license: max 20 members, monthly fee capped at ₹1000.
+    </div>
+  </div>
+  <div class="settings-section">
+    <h3>Cloud Sync</h3>
+    <div id="sync-status-indicator" style="margin-bottom:10px;">
+      <span class="loan-notes">Status: </span>
+      <span id="sync-status-text" style="font-weight:600;">Disabled</span>
+    </div>
+    <div class="toggle-row">
+      <span class="toggle-label">Enable cloud sync</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="sync-toggle">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="form-group">
+      <label for="settings-collection-name">Collection name</label>
+      <input type="text" id="settings-collection-name" maxlength="50"
+             placeholder="my-fitness-club">
+    </div>
+    <div class="form-group">
+      <label for="settings-fs-api-key">API Key *</label>
+      <input type="text" id="settings-fs-api-key">
+    </div>
+    <div class="form-group">
+      <label for="settings-fs-project-id">Project ID *</label>
+      <input type="text" id="settings-fs-project-id">
+    </div>
+    <div class="form-group">
+      <label for="settings-fs-app-id">App ID *</label>
+      <input type="text" id="settings-fs-app-id">
+    </div>
+    <details>
+      <summary style="cursor:pointer;color:var(--text2);font-size:0.85rem;">
+        Optional fields
+      </summary>
+      <div class="form-group">
+        <label for="settings-fs-auth-domain">Auth Domain</label>
+        <input type="text" id="settings-fs-auth-domain">
+      </div>
+      <div class="form-group">
+        <label for="settings-fs-storage-bucket">Storage Bucket</label>
+        <input type="text" id="settings-fs-storage-bucket">
+      </div>
+      <div class="form-group">
+        <label for="settings-fs-sender-id">Messaging Sender ID</label>
+        <input type="text" id="settings-fs-sender-id">
+      </div>
+    </details>
+    <div class="error-message" id="sync-settings-error"></div>
+    <button class="btn btn-primary" id="sync-settings-save-btn" style="width:100%;margin-top:10px;">
+      Save sync settings
+    </button>
+    <div class="success-msg" id="sync-settings-save-msg" hidden>Sync settings saved!</div>
+  </div>
+  <div class="settings-section">
+    <h3>Backup &amp; restore</h3>
+    <p class="backup-info" id="backup-last-info">No backups yet.</p>
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-primary" id="backup-btn" style="flex:1;">Create backup</button>
+      <button class="btn btn-secondary" id="restore-btn" style="flex:1;">Restore</button>
+      <input type="file" id="restore-file" accept=".json" hidden>
+    </div>
+  </div>
+</main>
+
+<!-- ══ Bottom Navigation ══════════════════════════════ -->
+<!-- ══ More popup menu ════════════════════════════════ -->
+<div id="more-menu" class="more-menu" hidden>
+  <button class="more-menu-item" data-screen="history-screen">
+    <span class="more-menu-icon">📋</span><span>History</span>
+  </button>
+  <button class="more-menu-item" data-screen="contributions-screen">
+    <span class="more-menu-icon">💰</span><span>Fees</span>
+  </button>
+  <button class="more-menu-item" data-screen="expenses-screen">
+    <span class="more-menu-icon">🧾</span><span>Expenses</span>
+  </button>
+  <button class="more-menu-item" data-screen="reports-screen">
+    <span class="more-menu-icon">📊</span><span>Reports</span>
+  </button>
+  <button class="more-menu-item" data-screen="settings-screen">
+    <span class="more-menu-icon">⚙️</span><span>Settings</span>
+  </button>
+</div>
+<div id="more-menu-backdrop" class="more-menu-backdrop" hidden></div>
+
+<nav class="nav-bar">
+  <button class="nav-tab active" data-screen="members-screen">
+    <span class="nav-icon">👥</span><span>Members</span>
+  </button>
+  <button class="nav-tab" data-screen="monthly-screen">
+    <span class="nav-icon">📅</span><span>Monthly</span>
+  </button>
+  <button class="nav-tab" data-screen="guest-screen">
+    <span class="nav-icon">🏋️</span><span>Guest</span>
+  </button>
+
+  <button class="nav-tab" id="more-btn">
+    <span class="nav-icon">⋯</span><span>More</span>
+  </button>
+</nav>
+
+<!-- ══ Monthly Payment Modal ══════════════════════════ -->
+<div class="modal-overlay" id="monthly-payment-modal" hidden>
+  <div class="modal">
+    <div class="modal-title" id="monthly-modal-member"></div>
+    <div class="modal-subtitle">Collect monthly contribution</div>
+    <div id="monthly-modal-balance" style="margin-bottom:10px;font-size:0.9rem;"></div>
+    <div class="qr-container" id="monthly-qr-container"></div>
+    <div class="form-group">
+      <label for="monthly-payment-amount">Amount (₹)</label>
+      <input type="number" id="monthly-payment-amount" min="0.01" step="0.01" inputmode="decimal" style="font-size:1.1rem;font-weight:600;"
+  oninput="(function(el){
+    if(!window._isLicensed&&parseFloat(el.value)>1000){el.value=1000;el.style.borderColor='var(--danger)';}else{el.style.borderColor='';}
+  })(this)">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="monthly-confirm-btn" onclick="
+  var amt = parseFloat(document.getElementById('monthly-payment-amount').value)||0;
+  if(!window._isLicensed && amt > 1000){ alert('Unlicensed limit: monthly payment cannot exceed ₹1000.\nYou entered ₹'+amt.toFixed(2)+'.\nActivate a license to remove this restriction.'); event.stopImmediatePropagation(); return false; }
+">Confirm payment</button>
+      <button class="btn btn-secondary" id="monthly-cancel-btn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Sessions Payment Modal ═══════════════════════ -->
+<div class="modal-overlay" id="guest-payment-modal" hidden>
+  <div class="modal">
+    <div class="modal-title" id="guest-modal-member"></div>
+    <div class="modal-subtitle">Collect session fee</div>
+    <div id="guest-fee-hint" style="font-size:0.82rem;color:var(--text2);margin-bottom:8px;"></div>
+    <div class="qr-container" id="guest-qr-container"></div>
+    <div class="form-group">
+      <label for="guest-payment-amount">Amount (₹)</label>
+      <input type="number" id="guest-payment-amount" min="0.01" step="0.01" inputmode="decimal" style="font-size:1.1rem;font-weight:600;"
+  oninput="(function(el){
+    if(!window._isLicensed&&parseFloat(el.value)>1000){el.value=1000;el.style.borderColor='var(--danger)';}else{el.style.borderColor='';}
+  })(this)">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="guest-confirm-btn" onclick="
+  var amt = parseFloat(document.getElementById('guest-payment-amount').value)||0;
+  if(!window._isLicensed && amt > 1000){ alert('Unlicensed limit: guest payment cannot exceed ₹1000.\nYou entered ₹'+amt.toFixed(2)+'.\nActivate a license to remove this restriction.'); event.stopImmediatePropagation(); return false; }
+">Confirm payment</button>
+      <button class="btn btn-secondary" id="guest-cancel-btn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ History Edit Modal ════════════════════════════ -->
+<div class="modal-overlay" id="history-edit-modal" hidden>
+  <div class="modal">
+    <div class="modal-title" id="history-edit-title">Edit record</div>
+    <div class="form-group">
+      <label for="history-edit-date">Date</label>
+      <div class="date-picker-wrap"><input type="date" id="history-edit-date" class="date-picker-hidden"><div class="date-picker-display" data-for="history-edit-date">Select date</div></div>
+    </div>
+    <div id="history-edit-amount-wrap" class="form-group">
+      <label for="history-edit-amount">Amount (₹)</label>
+      <input type="number" id="history-edit-amount" min="0.01" step="0.01" inputmode="decimal">
+    </div>
+    <div id="history-edit-fee-wrap" class="form-group" hidden>
+      <label for="history-edit-fee">Session fee (₹)</label>
+      <input type="number" id="history-edit-fee" min="0.01" step="0.01" inputmode="decimal">
+    </div>
+    <div class="form-group">
+      <label for="history-edit-notes">Notes</label>
+      <textarea id="history-edit-notes" rows="2"></textarea>
+    </div>
+    <div class="error-message" id="history-edit-error" style="margin-bottom:6px;"></div>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="history-edit-save">Save</button>
+      <button class="btn btn-secondary" id="history-edit-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Setup Wizard Modal ══════════════════════════════ -->
+<div class="modal-overlay" id="setup-wizard-modal" hidden>
+  <div class="modal" style="max-width:400px;">
+    <div class="modal-title">Cloud Sync Setup</div>
+    <div class="modal-subtitle">Connect to Firestore for multi-device sync</div>
+
+    <div class="form-group">
+      <label for="wizard-collection-name">Database / Club name *</label>
+      <input type="text" id="wizard-collection-name" maxlength="50"
+             placeholder="my-fitness-club" pattern="[a-zA-Z0-9_-]+">
+      <div class="loan-notes">1–50 chars: letters, numbers, hyphens, underscores</div>
+    </div>
+
+    <div class="form-group">
+      <label for="wizard-api-key">API Key *</label>
+      <input type="text" id="wizard-api-key">
+    </div>
+    <div class="form-group">
+      <label for="wizard-project-id">Project ID *</label>
+      <input type="text" id="wizard-project-id">
+    </div>
+    <div class="form-group">
+      <label for="wizard-app-id">App ID *</label>
+      <input type="text" id="wizard-app-id">
+    </div>
+
+    <details>
+      <summary style="cursor:pointer;color:var(--text2);font-size:0.85rem;">
+        Optional fields
+      </summary>
+      <div class="form-group">
+        <label for="wizard-auth-domain">Auth Domain</label>
+        <input type="text" id="wizard-auth-domain" placeholder="project.firebaseapp.com">
+      </div>
+      <div class="form-group">
+        <label for="wizard-storage-bucket">Storage Bucket</label>
+        <input type="text" id="wizard-storage-bucket" placeholder="project.appspot.com">
+      </div>
+      <div class="form-group">
+        <label for="wizard-sender-id">Messaging Sender ID</label>
+        <input type="text" id="wizard-sender-id">
+      </div>
+    </details>
+
+    <div class="error-message" id="wizard-error"></div>
+
+    <div class="form-actions">
+      <button class="btn btn-primary" id="wizard-save-btn">Connect</button>
+      <button class="btn btn-secondary" id="wizard-skip-btn">Skip for now</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Scripts ════════════════════════════════════════ -->
+<script src="js/utils.js"></script>
+<script src="js/qrcode-lib.js"></script>
+<script src="js/license.js"></script>
+<script src="js/db.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/license-registry-config.js"></script>
+<script src="js/firestore-config.js"></script>
+<script src="js/sync-engine.js"></script>
+<script src="js/setup-wizard.js"></script>
+<script src="js/license-registry.js"></script>
+<script src="js/whatsapp.js"></script>
+<script src="js/members.js"></script>
+<script src="js/contributions.js"></script>
+<script src="js/monthly.js"></script>
+<script src="js/guestplay.js"></script>
+<script src="js/expenses.js"></script>
+<script src="js/history.js"></script>
+<script src="js/reports.js"></script>
+<script src="js/backup.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

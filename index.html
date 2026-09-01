@@ -4,14 +4,19 @@
   <!-- ══ Inline license limits — runs before any JS file, cannot be overridden ══ -->
   <script>
     // Version stamp — bump this with every release
-    window._APP_VERSION = '21';
+    window._APP_VERSION = '29';
 
     // Self-contained license check — does NOT depend on license.js
     window._isLicensed = (function () {
       try {
         var raw = (localStorage.getItem('tyf_license_key') || '').replace(/[\s\r\n]+/g, '');
         var d   = JSON.parse(atob(raw));
-        return !!(d && d.n && d.h && typeof d.h === 'string' && d.h.length === 64);
+        if (!(d && d.n && d.h && typeof d.h === 'string' && d.h.length === 64)) return false;
+        // Only date-restricted licenses accepted (perpetual rejected)
+        if (!d.f || !d.t) return false;
+        var today = new Date().toISOString().split('T')[0];
+        if (today < d.f || today > d.t) return false;
+        return true;
       } catch (e) { return false; }
     }());
 
@@ -66,20 +71,22 @@
   </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#0d1f15">
+  <meta name="theme-color" content="#1a1a2e">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Track Your Fitness</title>
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="icon" type="image/svg+xml" href="icons/icon-512.svg">
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
 
 <header class="app-header">
-  <span class="header-icon">🏋️</span>
+  <img src="icons/icon-192.svg" alt="Logo" class="header-icon" style="width:32px;height:32px;border-radius:6px;">
   <h1 id="app-name-header">Track Your Fitness</h1>
+  <button class="btn-icon" id="app-share-qr-btn" title="Share app" style="font-size:1.2rem;color:#fff;opacity:0.8;">📱</button>
   <button class="btn-icon" id="sync-btn" title="Sync now" style="font-size:1.3rem;color:#fff;opacity:0.8;" hidden>🔄</button>
 </header>
 
@@ -130,6 +137,13 @@
   <div class="form-container" id="member-form-container" hidden>
     <div class="form-title" id="member-form-title">Add member</div>
     <form id="member-form" novalidate>
+      <div class="member-photo-section" style="text-align:center;margin-bottom:12px;">
+        <div id="member-photo-preview" style="width:80px;height:80px;border-radius:50%;background:var(--bg3);margin:0 auto 8px;display:flex;align-items:center;justify-content:center;overflow:hidden;border:2px solid var(--border);">
+          <span style="font-size:2rem;color:var(--text3);">👤</span>
+        </div>
+        <button type="button" class="btn btn-sm btn-secondary" id="member-photo-btn">📷 Take Photo</button>
+        <input type="file" id="member-photo-input" accept="image/*" capture="environment" hidden>
+      </div>
       <div class="form-row">
         <div class="form-group">
           <label for="member-name">Full name *</label>
@@ -141,6 +155,19 @@
           <input type="tel" id="member-mobile" maxlength="10" inputmode="numeric">
           <div class="error-message" id="member-mobile-error"></div>
         </div>
+      </div>
+      <div class="form-group">
+        <label for="member-type">Member type</label>
+        <select id="member-type">
+          <option value="Regular">Regular</option>
+          <option value="Coaching">Coaching</option>
+          <option value="Other">Other (type below)</option>
+        </select>
+        <input type="text" id="member-type-custom" placeholder="Enter custom type…" hidden style="margin-top:4px;">
+      </div>
+      <div class="form-group">
+        <label for="member-valid-till">Valid till (optional)</label>
+        <input type="date" id="member-valid-till">
       </div>
       <div class="form-group">
         <label for="member-notes">Notes</label>
@@ -310,6 +337,35 @@
   <div id="expense-list"></div>
 </main>
 
+<!-- ══ Attendance ═════════════════════════════════════ -->
+<main id="attendance-screen" class="screen" hidden>
+  <div class="section-header">
+    <span class="screen-title">Attendance</span>
+    <div style="display:flex;gap:6px;">
+      <button class="btn btn-sm btn-secondary" id="att-copy-yesterday-btn">📋 Copy from date</button>
+      <button class="btn btn-sm btn-primary" id="att-scan-qr-btn">📷 Scan QR</button>
+    </div>
+  </div>
+  <div class="filter-bar">
+    <div class="date-picker-wrap"><input type="date" id="att-date" class="date-picker-hidden"><div class="date-picker-display" data-for="att-date">Select date</div></div>
+    <input type="text" id="att-search" placeholder="Search member…">
+  </div>
+  <div class="bulk-select-all-row">
+    <label><input type="checkbox" id="att-select-all"> Select all visible</label>
+    <span id="att-present-count" class="bulk-count">0 present</span>
+  </div>
+  <div class="att-filter-group" style="display:flex;gap:4px;margin-bottom:4px;">
+    <button class="btn btn-sm att-filter-btn active" data-filter="absent">Absent</button>
+    <button class="btn btn-sm att-filter-btn" data-filter="present">Present</button>
+    <button class="btn btn-sm att-filter-btn" data-filter="all">All</button>
+  </div>
+  <div id="att-member-list"></div>
+  <button class="btn btn-primary" id="att-save-btn" style="width:100%;margin-top:8px;flex-shrink:0;">💾 Save Attendance</button>
+  <div class="success-msg" id="att-save-msg" hidden style="text-align:center;">Attendance saved!</div>
+  <div id="att-qr-scanner-container" hidden></div>
+  <div id="att-scan-result" hidden></div>
+</main>
+
 <!-- ══ History ════════════════════════════════════════ -->
 <main id="history-screen" class="screen" hidden>
   <div class="section-header">
@@ -341,10 +397,11 @@
 
   <!-- Report type tabs -->
   <div class="report-tabs">
-    <button class="report-tab-btn active" data-tab="daywise">Day-wise</button>
-    <button class="report-tab-btn" data-tab="memberwise">Member-wise</button>
+    <button class="report-tab-btn active" data-tab="daywise">Daily Collection</button>
+    <button class="report-tab-btn" data-tab="memberwise">Fee Collection</button>
     <button class="report-tab-btn" data-tab="outstanding">Outstanding</button>
     <button class="report-tab-btn" data-tab="balance">Balance</button>
+    <button class="report-tab-btn" data-tab="attendance">Attendance</button>
   </div>
 
   <!-- Tab panels — filters live INSIDE each panel so they never overlap the tab bar -->
@@ -381,6 +438,24 @@
       <div class="date-picker-wrap"><input type="date" id="report-end-balance" class="date-picker-hidden"><div class="date-picker-display" data-for="report-end-balance">Select date</div></div>
     </div>
     <div id="report-output-balance"></div>
+  </div>
+
+  <div class="report-tab-panel" data-tab="attendance" hidden>
+    <div class="filter-bar">
+      <div class="date-picker-wrap"><input type="date" id="report-start-att" class="date-picker-hidden"><div class="date-picker-display" data-for="report-start-att">Start date</div></div>
+      <div class="date-picker-wrap"><input type="date" id="report-end-att" class="date-picker-hidden"><div class="date-picker-display" data-for="report-end-att">End date</div></div>
+    </div>
+    <div class="filter-bar">
+      <input type="text" id="report-search-att" placeholder="Filter by member or type…" style="flex:2;">
+      <select id="report-att-operator" style="flex:1;padding:7px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.9rem;">
+        <option value="all">All</option>
+        <option value="gte">Days ≥</option>
+        <option value="lte">Days ≤</option>
+        <option value="eq">Days =</option>
+      </select>
+      <input type="number" id="report-att-days" min="0" placeholder="0" style="width:60px;padding:7px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.9rem;">
+    </div>
+    <div id="report-output-attendance"></div>
   </div>
 </main>
 
@@ -426,17 +501,17 @@
       <label class="toggle-switch"><input type="checkbox" id="wa-toggle-guest"><span class="toggle-slider"></span></label>
     </div>
     <div class="form-group" style="margin-top:10px;">
-      <label>Monthly confirmation template</label>
+      <label for="wa-tpl-monthly-confirm">Monthly confirmation template</label>
       <textarea id="wa-tpl-monthly-confirm" rows="3"></textarea>
       <div class="loan-notes">Variables: {memberName} {amount} {date} {balance}</div>
     </div>
     <div class="form-group">
-      <label>Monthly reminder template</label>
+      <label for="wa-tpl-monthly-reminder">Monthly reminder template</label>
       <textarea id="wa-tpl-monthly-reminder" rows="3"></textarea>
       <div class="loan-notes">Variables: {memberName} {balance} {fee}</div>
     </div>
     <div class="form-group">
-      <label>Session confirmation template</label>
+      <label for="wa-tpl-guest-confirm">Session confirmation template</label>
       <textarea id="wa-tpl-guest-confirm" rows="3"></textarea>
       <div class="loan-notes">Variables: {memberName} {amount} {date}</div>
     </div>
@@ -523,9 +598,11 @@
       </div>
     </details>
     <div class="error-message" id="sync-settings-error"></div>
-    <button class="btn btn-primary" id="sync-settings-save-btn" style="width:100%;margin-top:10px;">
-      Save sync settings
-    </button>
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      <button class="btn btn-secondary" id="sync-test-btn" style="flex:1;">Test connection</button>
+      <button class="btn btn-primary" id="sync-settings-save-btn" style="flex:1;">Save sync settings</button>
+    </div>
+    <div id="sync-test-result" class="sync-test-result" hidden></div>
     <div class="success-msg" id="sync-settings-save-msg" hidden>Sync settings saved!</div>
   </div>
   <div class="settings-section">
@@ -542,6 +619,9 @@
 <!-- ══ Bottom Navigation ══════════════════════════════ -->
 <!-- ══ More popup menu ════════════════════════════════ -->
 <div id="more-menu" class="more-menu" hidden>
+  <button class="more-menu-item" data-screen="attendance-screen">
+    <span class="more-menu-icon">✅</span><span>Attendance</span>
+  </button>
   <button class="more-menu-item" data-screen="history-screen">
     <span class="more-menu-icon">📋</span><span>History</span>
   </button>
@@ -568,7 +648,7 @@
     <span class="nav-icon">📅</span><span>Monthly</span>
   </button>
   <button class="nav-tab" data-screen="guest-screen">
-    <span class="nav-icon">🏋️</span><span>Guest</span>
+    <span class="nav-icon">🏸</span><span>Sessions</span>
   </button>
 
   <button class="nav-tab" id="more-btn">
@@ -705,6 +785,38 @@
   </div>
 </div>
 
+<!-- ══ ID Card Print Overlay ═══════════════════════════ -->
+<div id="id-card-overlay" class="id-card-overlay" hidden></div>
+
+<!-- ══ Copy Attendance Date Modal ═════════════════════ -->
+<div class="modal-overlay" id="att-copy-date-modal" hidden>
+  <div class="modal" style="max-width:320px;">
+    <div class="modal-title">Copy attendance from</div>
+    <div class="form-group">
+      <label for="att-copy-source-date">Select date</label>
+      <div class="date-picker-wrap"><input type="date" id="att-copy-source-date" class="date-picker-hidden"><div class="date-picker-display" data-for="att-copy-source-date">Select date</div></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="att-copy-confirm-btn">Copy</button>
+      <button class="btn btn-secondary" id="att-copy-cancel-btn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ App Share QR Modal ═════════════════════════════ -->
+<div class="modal-overlay" id="app-share-qr-modal" hidden>
+  <div class="modal" style="max-width:320px;text-align:center;">
+    <div class="modal-title">Share this App</div>
+    <div class="modal-subtitle">Scan to open on another device</div>
+    <div id="app-share-qr-container" style="display:flex;justify-content:center;margin:16px 0;"></div>
+    <p style="font-size:0.8rem;color:var(--text2);word-break:break-all;" id="app-share-url"></p>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="app-share-copy-btn">📋 Copy link</button>
+      <button class="btn btn-secondary" id="app-share-close-btn">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- ══ Scripts ════════════════════════════════════════ -->
 <script src="js/utils.js"></script>
 <script src="js/qrcode-lib.js"></script>
@@ -724,6 +836,8 @@
 <script src="js/expenses.js"></script>
 <script src="js/history.js"></script>
 <script src="js/reports.js"></script>
+<script src="js/id-card.js"></script>
+<script src="js/attendance.js"></script>
 <script src="js/backup.js"></script>
 <script src="js/app.js"></script>
 </body>

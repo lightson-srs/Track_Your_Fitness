@@ -40,7 +40,7 @@ const GuestPlay = (function () {
       var members  = await DB.getAllMembers();
       members = members.filter(function (m) { return m.status !== 'inactive'; });
       if (searchTerm) {
-        members = members.filter(function (m) { return m.name.toLowerCase().indexOf(searchTerm) !== -1; });
+        members = members.filter(function (m) { return m.name.toLowerCase().indexOf(searchTerm) !== -1 || (m.memberType && m.memberType.toLowerCase().indexOf(searchTerm) !== -1) || (m.notes && m.notes.toLowerCase().indexOf(searchTerm) !== -1); });
       }
       members.sort(function (a, b) { return a.name.localeCompare(b.name); });
 

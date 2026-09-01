@@ -133,7 +133,7 @@ const Monthly = (function () {
       members = members.filter(function (m) {
         return m.status !== 'inactive' && contribMap[m.id];
       });
-      if (searchTerm) members = members.filter(function (m) { return m.name.toLowerCase().indexOf(searchTerm) !== -1; });
+      if (searchTerm) members = members.filter(function (m) { return m.name.toLowerCase().indexOf(searchTerm) !== -1 || (m.memberType && m.memberType.toLowerCase().indexOf(searchTerm) !== -1) || (m.notes && m.notes.toLowerCase().indexOf(searchTerm) !== -1); });
       members.sort(function (a, b) { return a.name.localeCompare(b.name); });
 
       var items = [];
@@ -248,6 +248,16 @@ const Monthly = (function () {
       // sum(fee records ≤ date) - sum(payments ≤ date), same as Sessions logic.
       var member  = await DB.getMember(_pendingMemberId);
       var contrib = await DB.getContributionByMember(_pendingMemberId);
+
+      // Update member's validTill to end of the paid billing period
+      if (member && contrib) {
+        var period = getPeriodForDate(refDate, contrib);
+        if (period && period.end) {
+          member.validTill = period.end;
+          await DB.updateMember(member);
+        }
+      }
+
       hidePaymentModal();
       renderMonthlyList();
 

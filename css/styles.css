@@ -93,9 +93,9 @@
 [data-theme="sunset"] .badge-expense { background: #1a0a18; color: #f48fb1; }
 
 /* ── Base ──────────────────────────────────────────── */
-html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; font-size: 17px; background: var(--bg); color: var(--text); }
+html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; font-size: 17px; background: var(--bg); color: var(--text); overflow-x: hidden; }
 
-body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; box-shadow: 0 0 24px rgba(0,0,0,0.5); min-height: 100vh; }
+body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; box-shadow: 0 0 24px rgba(0,0,0,0.5); min-height: 100vh; overflow-x: hidden; padding-bottom: 56px; }
 
 /* ── App Header ─────────────────────────────────────── */
 .app-header { background: var(--primary-dark); color: #fff; padding: 12px 16px; display: flex; align-items: center; gap: 8px; position: sticky; top: 0; z-index: 100; }
@@ -116,11 +116,11 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 .app-header h1 { font-size: 1.15rem; font-weight: 600; flex: 1; }
 
 /* ── Screens ─────────────────────────────────────────── */
-.screen { flex: 1; overflow: hidden; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.screen { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-height: 0; -webkit-overflow-scrolling: touch; scroll-behavior: smooth; }
 .screen[hidden] { display: none !important; visibility: hidden !important; pointer-events: none !important; }
 
 /* ── Bottom Navigation ──────────────────────────────── */
-.nav-bar { background: var(--bg2); border-top: 1px solid var(--border); display: flex; position: sticky; bottom: 0; z-index: 100; }
+.nav-bar { background: var(--bg2); border-top: 1px solid var(--border); display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 100; max-width: 480px; margin: 0 auto; }
 .nav-tab { flex: 1; padding: 6px 2px 5px; border: none; background: none; color: var(--text2); cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 1px; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.02em; transition: color 0.2s; min-width: 0; }
 .nav-tab .nav-icon { font-size: 1.25rem; }
 .nav-tab span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
@@ -218,7 +218,8 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 .history-summary { background: var(--bg3); border-radius: 8px; padding: 10px 14px; font-size: 0.95rem; color: var(--text2); }
 
 /* ── Reports table ───────────────────────────────────── */
-.report-table { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
+.report-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; table-layout: fixed; word-wrap: break-word; }
+.report-table th, .report-table td { overflow: hidden; text-overflow: ellipsis; }
 .report-table th { background: var(--bg3); text-align: left; padding: 8px 10px; color: var(--text2); font-weight: 600; font-size: 0.86rem; text-transform: uppercase; }
 .report-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .report-table tr:last-child td { border-bottom: none; }
@@ -250,7 +251,7 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
   .screen { padding: 0; overflow: visible !important; height: auto !important; flex: none !important; }
   #reports-screen { overflow: visible !important; height: auto !important; }
   #reports-screen .report-tab-panel { overflow: visible !important; height: auto !important; flex: none !important; }
-  #monthly-list, #guest-list, #member-list, #contrib-list, #expense-list, #history-list { overflow: visible !important; height: auto !important; flex: none !important; }
+  #monthly-list, #guest-list, #member-list, #contrib-list, #expense-list, #history-list, #att-member-list { overflow: visible !important; height: auto !important; }
   .report-table { page-break-inside: auto; width: 100%; }
   .report-table tr { page-break-inside: avoid; }
   .client-card { page-break-inside: avoid; }
@@ -270,12 +271,11 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 [data-theme="light"] .badge-expense { background: #f3e5f5; color: #6a1b9a; }
 
 /* ── Report tabs ─────────────────────────────────────── */
-.report-tabs { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
-.report-tabs::-webkit-scrollbar { display: none; }
-.report-tab-btn { flex-shrink: 0; padding: 7px 14px; background: var(--bg3); border: 1px solid var(--border); border-radius: 20px; color: var(--text2); font-size: 0.97rem; font-weight: 500; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+.report-tabs { display: flex; gap: 4px; flex-wrap: wrap; padding-bottom: 4px; }
+.report-tab-btn { padding: 6px 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 20px; color: var(--text2); font-size: 0.82rem; font-weight: 500; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
 .report-tab-btn:hover { border-color: var(--primary); color: var(--text); }
 .report-tab-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
-.report-tab-panel { display: flex; flex-direction: column; gap: 10px; }
+.report-tab-panel { display: flex; flex-direction: column; gap: 10px; overflow-x: hidden; }
 .report-tab-panel[hidden] { display: none; }
 .report-section-title { font-size: 0.86rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text2); padding: 8px 0 2px; }
 
@@ -337,7 +337,7 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 #contributions-screen .section-header { flex-shrink: 0; }
 #contributions-screen .search-input { flex-shrink: 0; }
 
-#reports-screen { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
+#reports-screen { display: flex; flex-direction: column; overflow-y: auto; padding-bottom: 0; -webkit-overflow-scrolling: touch; }
 #reports-screen .report-tabs { flex-shrink: 0; }
 #reports-screen .report-tab-panel { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 12px; }
 /* Ensure hidden reports screen is truly invisible and non-interactive */
@@ -353,10 +353,13 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 .report-tabs, .settings-section, .backup-info { flex-shrink: 0; }
 
 /* Dynamic list containers: fill remaining space, scroll internally */
-#monthly-list, #guest-list, #member-list, #contrib-list, #expense-list, #history-list { flex: 1; min-height: 0; overflow-y: auto; }
+#monthly-list, #guest-list, #member-list, #contrib-list, #expense-list, #history-list, #att-member-list { flex: none; }
 
 /* Settings screen: all sections scroll together */
 #settings-screen { overflow-y: auto; }
+/* Members and Expenses screens scroll naturally with the page */
+#attendance-screen { display: flex; flex-direction: column; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+#attendance-screen .section-header, #attendance-screen .filter-bar, #attendance-screen .bulk-select-all-row, #att-qr-scanner-container, #att-scan-result { flex-shrink: 0; }
 #settings-screen .settings-section { flex-shrink: 0; }
 
 /* ── More popup menu ─────────────────────────────────── */
@@ -415,3 +418,93 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 }
 #sync-btn { transition: opacity 0.2s; }
 #sync-btn:hover { opacity: 1 !important; }
+
+/* ── ID Card ──────────────────────────────────────── */
+.id-card-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.8); z-index:300; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:20px; }
+.id-card-overlay[hidden] { display:none; }
+.id-card { background:#fff; color:#000; border-radius:8px; padding:16px; width:85mm; max-width:90vw; text-align:center; box-shadow:0 8px 32px rgba(0,0,0,0.3); }
+.id-card-header { font-size:0.65rem; font-weight:700; text-transform:uppercase; letter-spacing:0.1em; color:#666; margin-bottom:8px; border-bottom:2px solid #1976d2; padding-bottom:4px; }
+.id-card-name { font-size:1rem; font-weight:700; margin-bottom:4px; }
+.id-card-detail { font-size:0.75rem; color:#333; margin-bottom:2px; }
+.id-card-id { font-size:0.7rem; color:#999; margin-top:8px; font-family:monospace; word-break:break-all; }
+.id-card-qr { margin:16px auto; display:flex; justify-content:center; }
+.id-card-footer { font-size:0.8rem; color:#666; margin-top:12px; border-top:1px solid #ddd; padding-top:8px; }
+.id-card-actions { margin-top:16px; display:flex; gap:8px; }
+
+@media print {
+  body > *:not(.id-card-overlay) { display:none !important; }
+  .id-card-overlay:not([hidden]) { position:static; background:none; padding:0; display:flex !important; }
+  .id-card-actions { display:none !important; }
+  .id-card { box-shadow:none; border:1px solid #ccc; }
+}
+
+/* ── Attendance ───────────────────────────────────── */
+.att-member-row { display:flex; align-items:center; padding:10px 12px; border-bottom:1px solid var(--border); }
+.att-member-label { display:flex; align-items:center; gap:10px; cursor:pointer; width:100%; }
+.att-member-name { font-size:0.95rem; color:var(--text); }
+.att-checkbox { width:20px; height:20px; accent-color:var(--primary); cursor:pointer; }
+.att-scan-success { background:var(--success-bg); border:1px solid var(--success); border-radius:8px; padding:12px; margin:8px 0; text-align:center; }
+.att-scan-error { background:rgba(211,47,47,0.1); border:1px solid var(--danger); border-radius:8px; padding:12px; margin:8px 0; text-align:center; color:var(--danger); }
+.att-report-detail td { background:var(--bg2); }
+
+/* ── Attendance screen ──────────────────────────────── */
+.att-member-row { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-bottom:1px solid var(--border); }
+.att-member-row.att-present { background:var(--success-bg); }
+.att-member-label { display:flex; align-items:center; gap:10px; flex:1; cursor:pointer; }
+.att-member-label input[type="checkbox"] { width:18px; height:18px; accent-color:var(--primary); cursor:pointer; }
+.att-member-name { font-size:0.95rem; font-weight:500; }
+.att-status-label { font-size:0.8rem; font-weight:600; flex-shrink:0; }
+.att-status-present { color:var(--success); }
+.att-status-absent { color:var(--text3); }
+.att-scan-success { background:var(--success-bg); border:1px solid var(--success); border-radius:var(--radius); padding:14px; text-align:center; margin:8px 0; }
+.att-scan-error { background:var(--danger-bg); border:1px solid var(--danger); border-radius:var(--radius); padding:14px; text-align:center; margin:8px 0; color:var(--danger); }
+
+/* ── QR scan toast (prominent, centered feedback per scan) ── */
+.att-scan-toast {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) scale(0.9);
+  z-index: 9999;
+  min-width: 240px;
+  max-width: 86vw;
+  padding: 20px 24px;
+  border-radius: 16px;
+  text-align: center;
+  color: #fff;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.att-scan-toast-show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+.att-scan-toast-success { background: linear-gradient(135deg, #1e8e3e, #34a853); }
+.att-scan-toast-error { background: linear-gradient(135deg, #b71c1c, #d32f2f); }
+.att-scan-toast-icon { font-size: 2.4rem; line-height: 1; margin-bottom: 8px; }
+.att-scan-toast-title { font-size: 1.15rem; font-weight: 700; line-height: 1.25; }
+.att-scan-toast-sub { font-size: 0.95rem; font-weight: 600; margin-top: 6px; opacity: 0.95; }
+
+/* ── Cloud Sync: test-connection result ── */
+.sync-test-result { margin-top: 10px; padding: 10px 12px; border-radius: var(--radius); font-size: 0.85rem; line-height: 1.35; }
+.sync-test-pending { background: var(--bg3); color: var(--text2); }
+.sync-test-ok { background: var(--success-bg); border: 1px solid var(--success); color: var(--success); }
+.sync-test-fail { background: var(--danger-bg); border: 1px solid var(--danger); color: var(--danger); }
+
+/* ── Report table responsive ─────────────────────────── */
+.report-tab-panel { overflow-x: hidden; }
+.report-tab-panel .filter-bar { flex-wrap: wrap; }
+/* ── Mobile viewport fix ─────────────────────────────── */
+@media (max-width: 480px) {
+  body { max-width: 100vw; }
+  .form-row { flex-direction: column; gap: 0; }
+  .balance-cards { grid-template-columns: 1fr; }
+  .section-header { flex-wrap: wrap; }
+}
+
+/* ── Attendance filter group ─────────────────────────── */
+.att-filter-group { flex-shrink: 0; }
+.att-filter-btn { background: var(--bg3); color: var(--text2); border: 1px solid var(--border); }
+.att-filter-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+/* ── Member Photo ──────────────────────────────────── */
+.member-photo-section { flex-shrink: 0; }

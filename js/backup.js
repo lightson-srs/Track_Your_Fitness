@@ -29,10 +29,21 @@ const Backup = (function () {
       var expenses         = await DB.getAllExpenses();
       var guestSessions    = await DB.getAllGuestSessions();
       var monthlyFeeRecs   = await DB.getAllMonthlyFeeRecords();
+      var attendance        = await DB.getAllAttendance();
       var settings         = Settings.getAllSettings();
 
+      // Include Firebase/sync config
+      var firestoreConfig = null;
+      if (typeof FirestoreConfig !== 'undefined' && FirestoreConfig.hasConfig()) {
+        firestoreConfig = {
+          config: FirestoreConfig.getConfig(),
+          collectionName: FirestoreConfig.getCollectionName(),
+          syncEnabled: FirestoreConfig.isSyncEnabled()
+        };
+      }
+
       var backupData = {
-        version:   5,
+        version:   6,
         appName:   Settings.getAppName(),
         createdAt: new Date().toISOString(),
         data: {
@@ -42,7 +53,9 @@ const Backup = (function () {
           expenses,
           guestSessions,
           monthlyFeeRecs,
-          settings
+          attendance,
+          settings,
+          firestoreConfig
         }
       };
 
@@ -63,7 +76,8 @@ const Backup = (function () {
         payments.length + ' payments, ' +
         expenses.length + ' expenses, ' +
         guestSessions.length + ' guest sessions, ' +
-        monthlyFeeRecs.length + ' fee records';
+        monthlyFeeRecs.length + ' fee records, ' +
+        attendance.length + ' attendance records';
       console.log('Backup created:', counts);
     } catch (e) {
       alert('Backup failed: ' + e.message);
@@ -85,13 +99,15 @@ const Backup = (function () {
         if (!data || !data.data) { alert('Invalid backup file.'); return; }
 
         var {
-          members       = [],
-          contributions = [],
-          payments      = [],
-          expenses      = [],
-          guestSessions = [],
-          monthlyFeeRecs= [],
-          settings      = {}
+          members        = [],
+          contributions  = [],
+          payments       = [],
+          expenses       = [],
+          guestSessions  = [],
+          monthlyFeeRecs = [],
+          attendance     = [],
+          settings       = {},
+          firestoreConfig = null
         } = data.data;
 
         // ── Clear all stores ──
@@ -116,6 +132,9 @@ const Backup = (function () {
 
         var remainingCon = await DB.getAllContributions();
         for (var c  of remainingCon) await DB.deleteContribution(c.id);
+
+        var remainingAtt = await DB.getAllAttendance();
+        for (var at of remainingAtt) await DB.deleteAttendance(at.id);
 
         // ── Restore in dependency order — enforce license limits ──
         var maxMembers   = License.getMaxMembers();
@@ -160,6 +179,28 @@ const Backup = (function () {
           await DB.addMonthlyFeeRecord(mfr);
         }
 
+        // Restore attendance records
+        for (var att of attendance) {
+          try { await DB.addAttendance(att); } catch (ea) {}
+        }
+
+        // Restore Firestore/DB config if present, then reconnect so the app
+        // uses the restored database going forward (no reload required).
+        if (firestoreConfig && typeof FirestoreConfig !== 'undefined') {
+          if (firestoreConfig.config) FirestoreConfig.setConfig(firestoreConfig.config);
+          if (firestoreConfig.collectionName) FirestoreConfig.setCollectionName(firestoreConfig.collectionName);
+          if (firestoreConfig.syncEnabled !== undefined) FirestoreConfig.setSyncEnabled(firestoreConfig.syncEnabled);
+
+          // Re-init the sync engine with the restored config so it connects now.
+          if (typeof SyncEngine !== 'undefined' && SyncEngine.reinitialize) {
+            try { SyncEngine.reinitialize(); } catch (e) {}
+          }
+          // Refresh the Settings Cloud Sync fields + status if that module is loaded.
+          if (typeof Settings !== 'undefined' && Settings.initSyncSettings) {
+            try { Settings.initSyncSettings(); } catch (e) {}
+          }
+        }
+
         if (skippedMembers > 0) {
           alert('Note: ' + skippedMembers + ' member(s) were skipped — unlicensed limit of ' + maxMembers + ' active members reached. Fees above limits were capped automatically.');
         }
@@ -176,7 +217,9 @@ const Backup = (function () {
             '  Payments:       ' + payments.length       + '\n' +
             '  Expenses:       ' + expenses.length       + '\n' +
             '  Guest sessions: ' + guestSessions.length  + '\n' +
-            '  Fee records:    ' + monthlyFeeRecs.length);
+            '  Fee records:    ' + monthlyFeeRecs.length + '\n' +
+            '  Attendance:     ' + attendance.length     + '\n' +
+            '  Firestore config: ' + (firestoreConfig ? 'Yes' : 'No'));
         }
 
         Settings.setLastBackup(getTodayISO());

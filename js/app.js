@@ -1,7 +1,7 @@
 var App = (function () {
   'use strict';
-  var currentScreen = 'members-screen';
-  var moreScreens   = ['history-screen','contributions-screen','expenses-screen','reports-screen','settings-screen'];
+  var currentScreen = sessionStorage.getItem('tyf_current_screen') || 'members-screen';
+  var moreScreens   = ['history-screen','contributions-screen','expenses-screen','reports-screen','settings-screen','attendance-screen'];
 
   async function initApp() {
     try {
@@ -19,6 +19,7 @@ var App = (function () {
         }
       } catch(e) {}
       await DB.init();
+      await DB.deduplicateFeeRecords();
       if (typeof SetupWizard !== 'undefined') SetupWizard.init();
       if (typeof SyncEngine !== 'undefined') SyncEngine.init();
       if (typeof LicenseRegistry !== 'undefined') LicenseRegistry.report();
@@ -33,19 +34,21 @@ var App = (function () {
       Reports.init();
       WhatsApp.init();
       Backup.init();
+      if (typeof Attendance !== 'undefined') Attendance.init();
       setupTabNavigation();
       Settings.updateAppNameDisplay();
       initDatePickers();
       registerServiceWorker();
       Backup.checkBackupReminder();
 
-      // Listen for remote sync updates
+      // Listen for sync complete — refresh current screen once
       document.addEventListener('tyf-sync-update', function () {
         refreshScreenData(currentScreen);
       });
 
       // Sync button in header
       initSyncButton();
+      initAppShareQR();
     } catch (e) {
       console.error('App init failed:', e);
       alert('Could not initialize app: ' + e.message);
@@ -60,8 +63,8 @@ var App = (function () {
       tab.classList.toggle('active', tab.getAttribute('data-screen') === screenId);
     });
     currentScreen = screenId;
+    try { sessionStorage.setItem('tyf_current_screen', screenId); } catch(e) {}
     refreshScreenData(screenId);
-    initDatePickers();
   }
 
   function refreshScreenData(screenId) {
@@ -73,6 +76,7 @@ var App = (function () {
       case 'expenses-screen':      if (typeof Expenses      !== 'undefined') Expenses.renderExpenseList();      break;
       case 'history-screen':       if (typeof PaymentHistory!== 'undefined') PaymentHistory.renderHistory();    break;
       case 'reports-screen':       if (typeof Reports       !== 'undefined') Reports.renderActiveReport();      break;
+      case 'attendance-screen':    if (typeof Attendance    !== 'undefined') Attendance.renderAttendance();     break;
     }
   }
 
@@ -121,7 +125,13 @@ var App = (function () {
     var backdrop = document.getElementById('more-menu-backdrop');
     if (backdrop) backdrop.addEventListener('click', closeMoreMenu);
 
-    navigateToScreen(currentScreen);
+    // Show the initial screen WITHOUT re-rendering (modules already rendered in their init)
+    document.querySelectorAll('.screen').forEach(function (s) { s.setAttribute('hidden', ''); });
+    var initTarget = document.getElementById(currentScreen);
+    if (initTarget) initTarget.removeAttribute('hidden');
+    document.querySelectorAll('.nav-tab').forEach(function (tab) {
+      tab.classList.toggle('active', tab.getAttribute('data-screen') === currentScreen);
+    });
   }
 
   function registerServiceWorker() {
@@ -145,20 +155,10 @@ var App = (function () {
       })
       .catch(function (err) { console.log('SW failed:', err); });
 
-    // Listen for SW_UPDATED message — reload to get new files
+    // SW updates are handled silently — new version loads on next visit
     navigator.serviceWorker.addEventListener('message', function (event) {
       if (event.data && event.data.type === 'SW_UPDATED') {
-        console.log('New version available — reloading...');
-        window.location.reload();
-      }
-    });
-
-    // Also handle controller change (SW took control)
-    var refreshing = false;
-    navigator.serviceWorker.addEventListener('controllerchange', function () {
-      if (!refreshing) {
-        refreshing = true;
-        window.location.reload();
+        console.log('App updated to latest version.');
       }
     });
   }
@@ -205,6 +205,41 @@ var App = (function () {
         syncBtn.removeAttribute('hidden');
       }
     });
+  }
+
+  // --- App Share QR Code ---
+  function initAppShareQR() {
+    var btn = document.getElementById('app-share-qr-btn');
+    var modal = document.getElementById('app-share-qr-modal');
+    var closeBtn = document.getElementById('app-share-close-btn');
+    var copyBtn = document.getElementById('app-share-copy-btn');
+    var qrContainer = document.getElementById('app-share-qr-container');
+    var urlEl = document.getElementById('app-share-url');
+
+    if (!btn || !modal) return;
+
+    var appUrl = window.location.href.split('?')[0];
+
+    btn.addEventListener('click', function () {
+      modal.removeAttribute('hidden');
+      if (urlEl) urlEl.textContent = appUrl;
+      // Render QR if not already done
+      if (qrContainer && !qrContainer.hasChildNodes() && typeof QRCode !== 'undefined') {
+        try { new QRCode(qrContainer, { text: appUrl, width: 180, height: 180, correctLevel: QRCode.CorrectLevel.M }); }
+        catch (e) { qrContainer.innerHTML = '<p style="color:var(--text3);">QR generation failed.</p>'; }
+      }
+    });
+
+    if (closeBtn) closeBtn.addEventListener('click', function () { modal.setAttribute('hidden', ''); });
+    if (copyBtn) copyBtn.addEventListener('click', function () {
+      navigator.clipboard.writeText(appUrl).then(function () {
+        copyBtn.textContent = '✅ Copied!';
+        setTimeout(function () { copyBtn.textContent = '📋 Copy link'; }, 2000);
+      }).catch(function () { alert('Copy failed. URL: ' + appUrl); });
+    });
+
+    // Close on backdrop click
+    modal.addEventListener('click', function (e) { if (e.target === modal) modal.setAttribute('hidden', ''); });
   }
 
   document.addEventListener('DOMContentLoaded', initApp);

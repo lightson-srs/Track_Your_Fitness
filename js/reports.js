@@ -12,11 +12,11 @@ const Reports = (function () {
     var monthStart = today.substring(0, 8) + '01';
 
     // Set default date ranges
-    ['report-start','report-start-mw','report-start-balance'].forEach(function (id) {
+    ['report-start','report-start-mw','report-start-balance','report-start-att'].forEach(function (id) {
       var el = document.getElementById(id);
       if (el && !el.value) { el.value = monthStart; syncDatePicker(id); }
     });
-    ['report-end','report-end-mw','report-end-balance','report-outstanding-date'].forEach(function (id) {
+    ['report-end','report-end-mw','report-end-balance','report-outstanding-date','report-end-att'].forEach(function (id) {
       var el = document.getElementById(id);
       if (el && !el.value) { el.value = today; syncDatePicker(id); }
     });
@@ -30,11 +30,17 @@ const Reports = (function () {
     ['report-start','report-end',
      'report-start-mw','report-end-mw',
      'report-start-balance','report-end-balance',
-     'report-outstanding-date'].forEach(function (id) {
+     'report-outstanding-date',
+     'report-start-att','report-end-att'].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.addEventListener('change', renderActiveReport);
     });
-    ['report-search','report-search-mw','report-search-os'].forEach(function (id) {
+    // Attendance report filter inputs
+    var attOperator = document.getElementById('report-att-operator');
+    var attDays = document.getElementById('report-att-days');
+    if (attOperator) attOperator.addEventListener('change', renderActiveReport);
+    if (attDays) attDays.addEventListener('input', renderActiveReport);
+    ['report-search','report-search-mw','report-search-os','report-search-att'].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.addEventListener('input', renderActiveReport);
     });
@@ -74,6 +80,7 @@ const Reports = (function () {
       case 'memberwise':  renderMemberwise();  break;
       case 'outstanding': renderOutstanding(); break;
       case 'balance':     renderBalance();     break;
+      case 'attendance':  renderAttendanceReport(); break;
     }
   }
 
@@ -229,22 +236,29 @@ const Reports = (function () {
       var netBalance    = totalCollection - totalExpenses;
       var balClass      = netBalance >= 0 ? 'amount-paid' : 'amount-due';
 
-      // ── Cumulative outstanding as of END date (all time up to refDate) ──
-      // Monthly: all fee records <= refDate minus all monthly payments <= refDate
-      var allFeeRecs      = await DB.getAllMonthlyFeeRecords();
-      var allPayments     = await DB.getAllPayments();
+      // ── Cumulative outstanding as of END date — uses same logic as Outstanding report ──
+      var allMembers = await DB.getAllMembers();
+      var allContribs = await DB.getAllContributions();
+      var contribMap2 = {};
+      allContribs.forEach(function (c) { contribMap2[c.memberId] = c; });
+
+      var cumMonthlyOutstanding = 0;
+      var enrolledMembers = allMembers.filter(function (m) { return m.status !== 'inactive' && contribMap2[m.id]; });
+      for (var bi = 0; bi < enrolledMembers.length; bi++) {
+        var bm = enrolledMembers[bi];
+        var bc = contribMap2[bm.id];
+        if (typeof Monthly !== 'undefined' && Monthly.calcMemberBalance) {
+          var bBal = await Monthly.calcMemberBalance(bm, bc, refDate);
+          if (bBal.balance > 0) cumMonthlyOutstanding += bBal.balance;
+        }
+      }
+
+      // Guest outstanding
       var allSessions     = await DB.getAllGuestSessions();
-
-      var cumMonthlyFees  = allFeeRecs.filter(function (r) { return r.date <= refDate; })
-                                      .reduce(function (s, r) { return s + (r.fee || 0); }, 0);
-      var cumMonthlyPaid  = allPayments.filter(function (p) { return p.type === 'monthly' && p.date <= refDate; })
-                                       .reduce(function (s, p) { return s + (p.amount || 0); }, 0);
-      var cumMonthlyOutstanding = Math.max(0, cumMonthlyFees - cumMonthlyPaid);
-
-      // Guest: all session fees <= refDate minus all guest payments <= refDate
+      var allPayments2    = await DB.getAllPayments();
       var cumGuestFees    = allSessions.filter(function (s) { return s.date <= refDate; })
                                        .reduce(function (sum, s) { return sum + (s.fee || 0); }, 0);
-      var cumGuestPaid    = allPayments.filter(function (p) { return p.type === 'guest_play' && p.date <= refDate; })
+      var cumGuestPaid    = allPayments2.filter(function (p) { return p.type === 'guest_play' && p.date <= refDate; })
                                        .reduce(function (sum, p) { return sum + (p.amount || 0); }, 0);
       var cumGuestOutstanding = Math.max(0, cumGuestFees - cumGuestPaid);
 
@@ -308,6 +322,104 @@ const Reports = (function () {
 
       container.innerHTML = html;
     } catch (e) { container.innerHTML = '<p class="empty-message">Error loading report.</p>'; console.error(e); }
+  }
+
+  // ── Attendance report ─────────────────────────────────
+  async function renderAttendanceReport() {
+    var container = document.getElementById('report-output-attendance');
+    if (!container) return;
+    var { start, end } = getDateRange('report-start-att', 'report-end-att');
+    var searchTerm = getSearch('report-search-att');
+    var operatorEl = document.getElementById('report-att-operator');
+    var daysEl = document.getElementById('report-att-days');
+    var operator = operatorEl ? operatorEl.value : 'all';
+    var daysFilter = daysEl ? parseInt(daysEl.value, 10) : NaN;
+    container.innerHTML = '<p class="empty-message">Loading…</p>';
+
+    try {
+      if (!start || !end) { container.innerHTML = '<p class="empty-message">Select a date range.</p>'; return; }
+
+      var records = await DB.getAttendanceByDateRange(start, end);
+      var members = await DB.getAllMembers();
+      var memberMap = {};
+      members.forEach(function (m) { memberMap[m.id] = m; });
+
+      // Only count 'present' records
+      var presentRecords = records.filter(function (r) { return r.status === 'present'; });
+
+      // Aggregate per-member
+      var countMap = {};   // memberId → count
+      var datesMap = {};   // memberId → [dates]
+      presentRecords.forEach(function (r) {
+        if (!countMap[r.memberId]) { countMap[r.memberId] = 0; datesMap[r.memberId] = []; }
+        countMap[r.memberId]++;
+        datesMap[r.memberId].push(r.date);
+      });
+
+      // Build list of memberIds
+      var memberIds = Object.keys(countMap);
+
+      // Filter by search term (name or memberType)
+      if (searchTerm) {
+        memberIds = memberIds.filter(function (id) {
+          var m = memberMap[id];
+          if (!m) return false;
+          return m.name.toLowerCase().indexOf(searchTerm) !== -1 ||
+            (m.memberType && m.memberType.toLowerCase().indexOf(searchTerm) !== -1);
+        });
+      }
+
+      // Filter by days operator
+      if (operator !== 'all' && !isNaN(daysFilter)) {
+        memberIds = memberIds.filter(function (id) {
+          var count = countMap[id] || 0;
+          if (operator === 'gte') return count >= daysFilter;
+          if (operator === 'lte') return count <= daysFilter;
+          if (operator === 'eq') return count === daysFilter;
+          return true;
+        });
+      }
+
+      if (memberIds.length === 0) { container.innerHTML = '<p class="empty-message">No attendance data matching your filters.</p>'; return; }
+
+      // Sort by count descending
+      memberIds.sort(function (a, b) { return countMap[b] - countMap[a]; });
+
+      var totalDays = 0;
+      memberIds.forEach(function (id) { totalDays += countMap[id]; });
+
+      var html = '<div class="history-summary">Period: ' + fmtDate(start) + ' – ' + fmtDate(end) + ' · ' + memberIds.length + ' member(s) · ' + totalDays + ' total present-days</div>';
+      html += '<table class="report-table"><thead><tr><th>Member</th><th>Type</th><th>Days</th></tr></thead><tbody>';
+      memberIds.forEach(function (id) {
+        var m = memberMap[id];
+        var name = m ? esc(m.name) : 'Unknown';
+        var type = m && m.memberType ? esc(m.memberType) : '';
+        var dates = datesMap[id].slice().sort();
+        html += '<tr class="att-report-row" data-member-id="' + id + '" style="cursor:pointer;">';
+        html += '<td>' + name + '</td><td>' + type + '</td><td><strong>' + countMap[id] + '</strong></td></tr>';
+        html += '<tr class="att-report-detail" data-member-id="' + id + '" hidden><td colspan="3" style="padding:4px 12px;font-size:0.8rem;color:var(--text2);">';
+        html += dates.map(function (d) { return fmtDate(d); }).join(', ');
+        html += '</td></tr>';
+      });
+      html += '</tbody></table>';
+
+      container.innerHTML = html;
+
+      // Toggle detail rows on click
+      container.querySelectorAll('.att-report-row').forEach(function (row) {
+        row.addEventListener('click', function () {
+          var memberId = row.dataset.memberId;
+          var detail = container.querySelector('.att-report-detail[data-member-id="' + memberId + '"]');
+          if (detail) {
+            if (detail.hasAttribute('hidden')) detail.removeAttribute('hidden');
+            else detail.setAttribute('hidden', '');
+          }
+        });
+      });
+    } catch (e) {
+      container.innerHTML = '<p class="empty-message">Error loading attendance report.</p>';
+      console.error(e);
+    }
   }
 
   return { init, renderActiveReport };

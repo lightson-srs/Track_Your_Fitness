@@ -1,19 +1,13 @@
 const SyncEngine = (function () {
   'use strict';
 
-  const SYNCED_STORES = ['members', 'contributions', 'payments', 'expenses', 'guest_sessions', 'monthly_fee_records'];
+  const SYNCED_STORES = ['members', 'contributions', 'payments', 'expenses', 'guest_sessions', 'monthly_fee_records', 'attendance'];
   const QUEUE_KEY = 'tyf_sync_queue';
   const DEVICE_ID_KEY = 'tyf_device_id';
-  const RETRY_INITIAL_MS = 1000;
-  const RETRY_MAX_MS = 60000;
 
   let firebaseApp = null;
   let firestoreDb = null;
-  let listeners = [];
   let status = 'disabled';
-  let retryTimer = null;
-  let flushInProgress = false;
-  let pullPaused = true; // pause pull until first flush completes
 
   var STORE_METHOD_MAP = {
     members: { getAll: 'getAllMembers', update: 'updateMember', delete: 'deleteMember' },
@@ -21,8 +15,11 @@ const SyncEngine = (function () {
     payments: { getAll: 'getAllPayments', update: 'updatePayment', delete: 'deletePayment' },
     expenses: { getAll: 'getAllExpenses', update: 'updateExpense', delete: 'deleteExpense' },
     guest_sessions: { getAll: 'getAllGuestSessions', update: 'updateGuestSession', delete: 'deleteGuestSession' },
-    monthly_fee_records: { getAll: 'getAllMonthlyFeeRecords', update: 'updateMonthlyFeeRecord', delete: 'deleteMonthlyFeeRecord' }
+    monthly_fee_records: { getAll: 'getAllMonthlyFeeRecords', update: 'updateMonthlyFeeRecord', delete: 'deleteMonthlyFeeRecord' },
+    attendance: { getAll: 'getAllAttendance', update: 'updateAttendance', delete: 'deleteAttendance' }
   };
+
+  var _suppressNotify = false;
 
   function generateUUID() {
     if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -34,17 +31,15 @@ const SyncEngine = (function () {
 
   function getDeviceId() {
     var id = localStorage.getItem(DEVICE_ID_KEY);
-    if (!id) {
-      id = generateUUID();
-      try { localStorage.setItem(DEVICE_ID_KEY, id); } catch (e) {}
-    }
+    if (!id) { id = generateUUID(); try { localStorage.setItem(DEVICE_ID_KEY, id); } catch (e) {} }
     return id;
   }
 
-  // --- Firebase SDK Dynamic Loading ---
+  // --- Firebase SDK Loading ---
 
   function loadScript(src) {
     return new Promise(function (resolve, reject) {
+      if (document.querySelector('script[src="' + src + '"]')) { resolve(); return; }
       var script = document.createElement('script');
       script.src = src;
       script.onload = resolve;
@@ -55,40 +50,26 @@ const SyncEngine = (function () {
 
   async function loadFirebaseSDK() {
     if (window.firebase) return;
-    try {
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js');
-    } catch (e) {
-      console.error('SyncEngine: Firebase SDK load failed.', e);
-      status = 'disabled';
-      throw e;
-    }
+    await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
+    await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js');
   }
 
-  // --- Sync Queue Management ---
+  // --- Sync Queue ---
 
   function getQueue() {
-    try {
-      var raw = localStorage.getItem(QUEUE_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch (e) { return []; }
+    try { var raw = localStorage.getItem(QUEUE_KEY); return raw ? JSON.parse(raw) : []; }
+    catch (e) { return []; }
   }
 
   function saveQueue(queue) {
-    try {
-      localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
-    } catch (e) {
-      if (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014) {
-        console.warn('SyncEngine: localStorage quota exceeded. Dropping oldest.');
-        var reduced = queue.slice(Math.floor(queue.length / 2));
-        try { localStorage.setItem(QUEUE_KEY, JSON.stringify(reduced)); } catch (e2) {}
-      }
-    }
+    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(queue)); }
+    catch (e) { /* quota exceeded - trim */ try { localStorage.setItem(QUEUE_KEY, JSON.stringify(queue.slice(-50))); } catch(e2){} }
   }
 
   function getQueueSize() { return getQueue().length; }
 
   function notifyChange(storeName, record, opType) {
+    if (_suppressNotify) return;
     if (SYNCED_STORES.indexOf(storeName) === -1) return;
     if (!record || !record.id) return;
 
@@ -103,29 +84,13 @@ const SyncEngine = (function () {
       data._deviceId = getDeviceId();
     }
 
-    queue = queue.filter(function (entry) {
-      return !(entry.storeName === storeName && entry.docId === docId);
-    });
-
-    queue.push({
-      id: generateUUID(),
-      storeName: storeName,
-      docId: docId,
-      operation: opType === 'delete' ? 'delete' : 'put',
-      data: data,
-      timestamp: now,
-      retryCount: 0
-    });
-
+    // Dedup: remove older entry for same store+doc
+    queue = queue.filter(function (e) { return !(e.storeName === storeName && e.docId === docId); });
+    queue.push({ storeName: storeName, docId: docId, operation: opType === 'delete' ? 'delete' : 'put', data: data });
     saveQueue(queue);
-
-    // If connected and pull is not paused, attempt immediate flush
-    if (status === 'connected' && !flushInProgress && !pullPaused) {
-      flushQueue();
-    }
   }
 
-  // --- Local-to-Remote Sync (Push) ---
+  // --- Push: send queued changes to Firestore ---
 
   function getCollectionRef(storeName) {
     if (!firestoreDb) return null;
@@ -134,171 +99,103 @@ const SyncEngine = (function () {
     return firestoreDb.collection(collectionName + '_' + storeName);
   }
 
-  /**
-   * Push all queued local changes to Firestore.
-   * Returns true if queue is fully flushed, false if items remain.
-   */
-  async function flushQueue() {
-    if (flushInProgress) return false;
-    if (status !== 'connected' || !firestoreDb) return false;
-    flushInProgress = true;
-
-    try {
-      var queue = getQueue();
-      if (queue.length === 0) { flushInProgress = false; return true; }
-
-      var remaining = [];
-      for (var i = 0; i < queue.length; i++) {
-        var entry = queue[i];
-        try {
-          var colRef = getCollectionRef(entry.storeName);
-          if (!colRef) { remaining.push(entry); continue; }
-          var docRef = colRef.doc(entry.docId);
-          if (entry.operation === 'delete') { await docRef.delete(); }
-          else { await docRef.set(entry.data); }
-        } catch (err) {
-          if (err.code === 'permission-denied') {
-            console.error('SyncEngine: Permission denied for', entry.storeName, entry.docId);
-            continue;
-          }
-          entry.retryCount = (entry.retryCount || 0) + 1;
-          remaining.push(entry);
-        }
-      }
-      saveQueue(remaining);
-      if (remaining.length > 0) { scheduleRetry(remaining[0].retryCount || 1); }
-      flushInProgress = false;
-      return remaining.length === 0;
-    } catch (e) {
-      console.error('SyncEngine: flushQueue error.', e);
-      flushInProgress = false;
-      return false;
-    }
-  }
-
-  function scheduleRetry(retryCount) {
-    if (retryTimer) clearTimeout(retryTimer);
-    var delay = Math.min(RETRY_INITIAL_MS * Math.pow(2, retryCount - 1), RETRY_MAX_MS);
-    retryTimer = setTimeout(function () {
-      retryTimer = null;
-      if (status === 'connected') { flushQueue(); }
-    }, delay);
-  }
-
-  function onOnline() {
-    if (status === 'disconnected' && FirestoreConfig.isSyncEnabled() && FirestoreConfig.hasConfig()) {
-      init();
-    } else if (status === 'connected') {
-      // Push first, then pull will happen via listener
-      flushQueue();
-    }
-  }
-
-  // --- Remote-to-Local Sync (Pull) ---
-  // Strategy: Firestore = source of truth.
-  // On snapshot, replace local store entirely with Firestore data.
-  // BUT only after initial flush is done (so offline edits reach Firestore first).
-
-  function attachListeners() {
+  async function push() {
     if (!firestoreDb) return;
-    var collectionName = FirestoreConfig.getCollectionName();
-    if (!collectionName) return;
+    var queue = getQueue();
+    if (queue.length === 0) return;
+    console.log('[SYNC] Pushing', queue.length, 'queued changes');
 
-    for (var i = 0; i < SYNCED_STORES.length; i++) {
-      (function (storeName) {
-        var colRef = firestoreDb.collection(collectionName + '_' + storeName);
-        var unsubscribe = colRef.onSnapshot(function (snapshot) {
-          // Only process pull if not paused (i.e., initial flush is done)
-          if (!pullPaused) {
-            replaceLocalStore(storeName, snapshot);
-          }
-        }, function (error) {
-          console.error('SyncEngine: Listener error for ' + storeName, error);
-          status = 'disconnected';
-        });
-        listeners.push(unsubscribe);
-      })(SYNCED_STORES[i]);
-    }
-  }
-
-  /**
-   * Replace entire local IndexedDB store with Firestore snapshot.
-   * Firestore = single source of truth.
-   */
-  async function replaceLocalStore(storeName, snapshot) {
-    if (!snapshot) return;
-    var methods = STORE_METHOD_MAP[storeName];
-    if (!methods) return;
-
-    try {
-      // Build map of all remote docs
-      var remoteDocs = {};
-      snapshot.forEach(function (doc) {
-        remoteDocs[doc.id] = doc.data();
-      });
-
-      // Get all local records
-      var localRecords = await DB[methods.getAll]();
-      var localMap = {};
-      localRecords.forEach(function (r) { if (r.id) localMap[r.id] = r; });
-
-      // Delete local records not in Firestore
-      for (var localId in localMap) {
-        if (!remoteDocs[localId]) {
-          try { await DB[methods.delete](localId); } catch (e) {}
-        }
-      }
-
-      // Add/overwrite all remote records locally
-      for (var remoteId in remoteDocs) {
-        try {
-          await DB[methods.update](remoteDocs[remoteId]);
-        } catch (e) {
-          console.error('SyncEngine: Error writing remote record', storeName, remoteId, e);
-        }
-      }
-
-      // Notify UI to refresh
-      document.dispatchEvent(new CustomEvent('tyf-sync-update', { detail: { store: storeName } }));
-    } catch (e) {
-      console.error('SyncEngine: replaceLocalStore error for ' + storeName, e);
-    }
-  }
-
-  /**
-   * Perform a one-time full pull for all stores.
-   * Called after initial flush completes to get the full Firestore state.
-   */
-  async function fullPull() {
-    if (!firestoreDb) return;
-    var collectionName = FirestoreConfig.getCollectionName();
-    if (!collectionName) return;
-
-    for (var i = 0; i < SYNCED_STORES.length; i++) {
-      var storeName = SYNCED_STORES[i];
+    var remaining = [];
+    for (var i = 0; i < queue.length; i++) {
+      var entry = queue[i];
       try {
+        var colRef = getCollectionRef(entry.storeName);
+        if (!colRef) { remaining.push(entry); continue; }
+        var docRef = colRef.doc(entry.docId);
+        if (entry.operation === 'delete') { await docRef.delete(); }
+        else { await docRef.set(entry.data); }
+      } catch (err) {
+        if (err.code !== 'permission-denied') { remaining.push(entry); }
+      }
+    }
+    saveQueue(remaining);
+    if (remaining.length > 0) console.log('[SYNC] Push incomplete,', remaining.length, 'items remaining');
+  }
+
+  // --- Pull: replace local DB with Firestore data (one-time, no listener) ---
+
+  async function pull() {
+    if (!firestoreDb) return;
+    var collectionName = FirestoreConfig.getCollectionName();
+    if (!collectionName) return;
+
+    console.log('[SYNC] Pulling full data from Firestore');
+    _suppressNotify = true;
+
+    try {
+      for (var i = 0; i < SYNCED_STORES.length; i++) {
+        var storeName = SYNCED_STORES[i];
+        var methods = STORE_METHOD_MAP[storeName];
+        if (!methods) continue;
+
         var colRef = firestoreDb.collection(collectionName + '_' + storeName);
         var snapshot = await colRef.get();
-        await replaceLocalStore(storeName, snapshot);
-      } catch (e) {
-        console.error('SyncEngine: fullPull error for ' + storeName, e);
+
+        // Build remote data map
+        var remoteDocs = {};
+        snapshot.forEach(function (doc) { remoteDocs[doc.id] = doc.data(); });
+
+        // Get local records
+        var localRecords = await DB[methods.getAll]();
+        var localMap = {};
+        localRecords.forEach(function (r) { if (r.id) localMap[r.id] = r; });
+
+        // Delete local records not in Firestore
+        for (var localId in localMap) {
+          if (!remoteDocs[localId]) {
+            try { await DB[methods.delete](localId); } catch (e) {}
+          }
+        }
+
+        // Overwrite local with remote
+        for (var remoteId in remoteDocs) {
+          try { await DB[methods.update](remoteDocs[remoteId]); } catch (e) {}
+        }
       }
+    } catch (e) {
+      console.error('[SYNC] Pull failed:', e);
     }
+
+    _suppressNotify = false;
+    console.log('[SYNC] Pull complete');
   }
 
-  // --- Lifecycle Methods ---
+  // --- Sync: push then pull (the only entry point) ---
 
-  async function init() {
-    if (typeof FirestoreConfig === 'undefined') { status = 'disabled'; return; }
-    if (!FirestoreConfig.isSyncEnabled() || !FirestoreConfig.hasConfig()) { status = 'disabled'; return; }
+  async function sync() {
+    if (status !== 'connected') {
+      var connected = await connect();
+      if (!connected) return;
+    }
+    await push();
+    await pull();
+    // Refresh UI once after sync
+    document.dispatchEvent(new CustomEvent('tyf-sync-update'));
+  }
+
+  // --- Connect to Firestore (no listeners) ---
+
+  async function connect() {
+    if (typeof FirestoreConfig === 'undefined') { status = 'disabled'; return false; }
+    if (!FirestoreConfig.isSyncEnabled() || !FirestoreConfig.hasConfig()) { status = 'disabled'; return false; }
 
     try {
       getDeviceId();
       await loadFirebaseSDK();
-      if (!window.firebase) { status = 'disabled'; return; }
+      if (!window.firebase) { status = 'disabled'; return false; }
 
       var config = FirestoreConfig.getConfig();
-      if (!config) { status = 'disabled'; return; }
+      if (!config) { status = 'disabled'; return false; }
 
       var firebaseConfig = {};
       if (config.apiKey) firebaseConfig.apiKey = config.apiKey;
@@ -309,49 +206,98 @@ const SyncEngine = (function () {
       if (config.appId) firebaseConfig.appId = config.appId;
 
       if (!firebaseApp) {
-        if (firebase.apps && firebase.apps.length > 0) {
-          firebaseApp = firebase.apps[0];
-        } else {
-          firebaseApp = firebase.initializeApp(firebaseConfig);
-        }
+        if (firebase.apps && firebase.apps.length > 0) { firebaseApp = firebase.apps[0]; }
+        else { firebaseApp = firebase.initializeApp(firebaseConfig); }
       }
 
       firestoreDb = firebase.firestore();
       status = 'connected';
-
-      // Step 1: Push all offline/queued changes to Firestore FIRST
-      pullPaused = true;
-      await flushQueue();
-
-      // Step 2: Full pull — replace local DB with Firestore (now includes our offline edits)
-      await fullPull();
-
-      // Step 3: Unpause and attach real-time listeners for ongoing changes
-      pullPaused = false;
-      attachListeners();
-
-      window.addEventListener('online', onOnline);
+      return true;
     } catch (e) {
-      console.error('SyncEngine: init failed.', e);
+      console.error('[SYNC] Connect failed:', e);
       status = 'disabled';
+      return false;
     }
+  }
+
+  // --- Test connection (does NOT touch the live sync app/connection) ---
+  // Initializes a throwaway secondary Firebase app with the supplied config,
+  // performs a lightweight read against the configured collection, then tears
+  // the app down. Returns { ok: boolean, message: string }.
+  async function testConnection(configObj, collectionName) {
+    if (!configObj) return { ok: false, message: 'No configuration provided.' };
+
+    // Reuse the shared validation for mandatory fields + collection name.
+    if (typeof FirestoreConfig !== 'undefined' && FirestoreConfig.validate) {
+      var v = FirestoreConfig.validate(configObj, collectionName);
+      if (!v.valid) return { ok: false, message: v.errors.join(' ') };
+    }
+
+    var testApp = null;
+    try {
+      await loadFirebaseSDK();
+      if (!window.firebase) {
+        return { ok: false, message: 'Firebase SDK could not be loaded. Check your internet connection.' };
+      }
+
+      var firebaseConfig = {};
+      if (configObj.apiKey) firebaseConfig.apiKey = configObj.apiKey;
+      if (configObj.authDomain) firebaseConfig.authDomain = configObj.authDomain;
+      if (configObj.projectId) firebaseConfig.projectId = configObj.projectId;
+      if (configObj.storageBucket) firebaseConfig.storageBucket = configObj.storageBucket;
+      if (configObj.messagingSenderId) firebaseConfig.messagingSenderId = configObj.messagingSenderId;
+      if (configObj.appId) firebaseConfig.appId = configObj.appId;
+
+      // Use a uniquely-named secondary app so we never collide with the live one.
+      var testAppName = '_tyf_test_' + Date.now();
+      testApp = firebase.initializeApp(firebaseConfig, testAppName);
+
+      var testDb = firebase.firestore(testApp);
+      // Lightweight read: limit(1) on the members collection under this prefix.
+      var colName = (collectionName || FirestoreConfig.getCollectionName() || 'test');
+      await testDb.collection(colName + '_members').limit(1).get();
+
+      return { ok: true, message: 'Connected successfully to project "' + (configObj.projectId || '') + '".' };
+    } catch (e) {
+      var msg = (e && e.message) ? e.message : 'Unknown error';
+      var code = e && e.code ? e.code : '';
+      if (code === 'permission-denied' || /permission/i.test(msg)) {
+        // Reached Firestore but rules blocked the read — credentials are valid.
+        return { ok: true, message: 'Connected, but Firestore rules denied the test read. Credentials are valid; check your security rules for access.' };
+      }
+      if (code === 'unavailable' || /network|offline|failed to get/i.test(msg)) {
+        return { ok: false, message: 'Could not reach Firestore. Check your network and project settings.' };
+      }
+      if (/invalid|api-key|api key|not-found|project/i.test(msg + ' ' + code)) {
+        return { ok: false, message: 'Connection failed — check API key / project ID / app ID. (' + msg + ')' };
+      }
+      return { ok: false, message: 'Connection failed: ' + msg };
+    } finally {
+      if (testApp) { try { await testApp.delete(); } catch (e) {} }
+    }
+  }
+
+  // --- Lifecycle ---
+
+  async function init() {
+    if (typeof FirestoreConfig === 'undefined') { status = 'disabled'; return; }
+    if (!FirestoreConfig.isSyncEnabled() || !FirestoreConfig.hasConfig()) { status = 'disabled'; return; }
+    // Connect and do one sync on startup
+    await sync();
   }
 
   async function reinitialize() { disconnect(); await init(); }
 
   function disconnect() {
-    for (var i = 0; i < listeners.length; i++) { try { listeners[i](); } catch (e) {} }
-    listeners = [];
-    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     firebaseApp = null;
     firestoreDb = null;
-    flushInProgress = false;
-    pullPaused = true;
     status = 'disconnected';
-    window.removeEventListener('online', onOnline);
   }
 
   function getStatus() { return status; }
+
+  // flushQueue is now just push (for backward compat with sync button)
+  async function flushQueue() { await sync(); }
 
   return {
     init: init,
@@ -360,6 +306,7 @@ const SyncEngine = (function () {
     notifyChange: notifyChange,
     getStatus: getStatus,
     flushQueue: flushQueue,
-    getQueueSize: getQueueSize
+    getQueueSize: getQueueSize,
+    testConnection: testConnection
   };
 })();

@@ -141,29 +141,32 @@ const Settings = (function () {
   // ═══ Cloud Sync Settings ═══════════════════════════════
 
   var _previousCollectionName = null;
+  var _syncSettingsBound = false;
 
   /**
    * Initialize Cloud Sync settings section.
    * Populates fields from FirestoreConfig and binds event listeners.
+   * Safe to call again (e.g. after a restore) — listeners bind only once.
    */
   function initSyncSettings() {
     if (typeof FirestoreConfig === 'undefined') return;
 
     var syncToggle = document.getElementById('sync-toggle');
     var syncSaveBtn = document.getElementById('sync-settings-save-btn');
+    var syncTestBtn = document.getElementById('sync-test-btn');
 
     // Populate fields
     populateSyncFields();
 
-    // Bind toggle
-    if (syncToggle) {
-      syncToggle.checked = FirestoreConfig.isSyncEnabled();
-      syncToggle.addEventListener('change', handleSyncToggle);
-    }
+    // Reflect current sync-enabled state on the toggle every time.
+    if (syncToggle) syncToggle.checked = FirestoreConfig.isSyncEnabled();
 
-    // Bind save button
-    if (syncSaveBtn) {
-      syncSaveBtn.addEventListener('click', handleSyncSave);
+    // Bind listeners once only.
+    if (!_syncSettingsBound) {
+      if (syncToggle)  syncToggle.addEventListener('change', handleSyncToggle);
+      if (syncSaveBtn) syncSaveBtn.addEventListener('click', handleSyncSave);
+      if (syncTestBtn) syncTestBtn.addEventListener('click', handleSyncTest);
+      _syncSettingsBound = true;
     }
 
     // Update status display
@@ -228,6 +231,75 @@ const Settings = (function () {
    * Handle the Save sync settings button.
    * Validates, stores config, and reinitializes SyncEngine.
    */
+  /**
+   * Read the current values from the Cloud Sync form fields.
+   * Returns { collectionName, config }.
+   */
+  function gatherSyncFields() {
+    function val(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
+    return {
+      collectionName: val('settings-collection-name'),
+      config: {
+        apiKey:            val('settings-fs-api-key'),
+        projectId:         val('settings-fs-project-id'),
+        appId:             val('settings-fs-app-id'),
+        authDomain:        val('settings-fs-auth-domain'),
+        storageBucket:     val('settings-fs-storage-bucket'),
+        messagingSenderId: val('settings-fs-sender-id')
+      }
+    };
+  }
+
+  /**
+   * Handle the Test connection button.
+   * Validates entered fields, connects with a throwaway Firebase app,
+   * and reports pass/fail — without saving or disturbing the live connection.
+   */
+  async function handleSyncTest(e) {
+    if (e) e.preventDefault();
+
+    var testBtn  = document.getElementById('sync-test-btn');
+    var errorEl  = document.getElementById('sync-settings-error');
+    var resultEl = document.getElementById('sync-test-result');
+    if (errorEl) errorEl.textContent = '';
+
+    var fields = gatherSyncFields();
+
+    // Validate before attempting a connection.
+    var result = FirestoreConfig.validate(fields.config, fields.collectionName);
+    if (!result.valid) {
+      if (errorEl) errorEl.textContent = result.errors.join(' ');
+      return;
+    }
+
+    if (typeof SyncEngine === 'undefined' || !SyncEngine.testConnection) {
+      if (errorEl) errorEl.textContent = 'Sync engine unavailable.';
+      return;
+    }
+
+    // Show in-progress state.
+    if (testBtn) { testBtn.disabled = true; testBtn.textContent = 'Testing…'; }
+    if (resultEl) {
+      resultEl.className = 'sync-test-result sync-test-pending';
+      resultEl.textContent = 'Connecting to Firestore…';
+      resultEl.removeAttribute('hidden');
+    }
+
+    var res;
+    try {
+      res = await SyncEngine.testConnection(fields.config, fields.collectionName);
+    } catch (err) {
+      res = { ok: false, message: (err && err.message) ? err.message : 'Connection test failed.' };
+    }
+
+    if (testBtn) { testBtn.disabled = false; testBtn.textContent = 'Test connection'; }
+    if (resultEl) {
+      resultEl.className = 'sync-test-result ' + (res.ok ? 'sync-test-ok' : 'sync-test-fail');
+      resultEl.textContent = (res.ok ? '✅ ' : '❌ ') + res.message;
+      resultEl.removeAttribute('hidden');
+    }
+  }
+
   function handleSyncSave(e) {
     if (e) e.preventDefault();
 
@@ -236,22 +308,9 @@ const Settings = (function () {
     if (errorEl) errorEl.textContent = '';
 
     // Gather values
-    var collectionName = (document.getElementById('settings-collection-name').value || '').trim();
-    var apiKey = (document.getElementById('settings-fs-api-key').value || '').trim();
-    var projectId = (document.getElementById('settings-fs-project-id').value || '').trim();
-    var appId = (document.getElementById('settings-fs-app-id').value || '').trim();
-    var authDomain = (document.getElementById('settings-fs-auth-domain').value || '').trim();
-    var storageBucket = (document.getElementById('settings-fs-storage-bucket').value || '').trim();
-    var senderId = (document.getElementById('settings-fs-sender-id').value || '').trim();
-
-    var configObj = {
-      apiKey: apiKey,
-      projectId: projectId,
-      appId: appId,
-      authDomain: authDomain,
-      storageBucket: storageBucket,
-      messagingSenderId: senderId
-    };
+    var fields = gatherSyncFields();
+    var collectionName = fields.collectionName;
+    var configObj = fields.config;
 
     // Validate
     var result = FirestoreConfig.validate(configObj, collectionName);

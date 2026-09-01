@@ -23,12 +23,10 @@ const SetupWizard = (function () {
     if (saveBtn) saveBtn.addEventListener('click', handleSubmit);
     if (skipBtn) skipBtn.addEventListener('click', handleSkip);
 
-    // Check launch condition
-    if (typeof FirestoreConfig !== 'undefined' &&
-        !FirestoreConfig.hasConfig() &&
-        !FirestoreConfig.isWizardSkipped()) {
-      show();
-    }
+    // Wizard no longer auto-shows on first launch.
+    // App works fully offline with local IndexedDB.
+    // User can configure Firestore from Settings → Cloud Sync when ready.
+    // Wizard can still be triggered manually via SetupWizard.show() if needed.
   }
 
   /**

@@ -204,9 +204,14 @@ const Contributions = (function () {
     // Derive period string (YYYY-MM) from the activation date
     var period = date.substring(0, 7); // e.g. '2026-06'
 
-    var updated = 0, enrolled = 0, feeCreated = 0, failed = 0;
+    var updated = 0, enrolled = 0, feeCreated = 0;
+    var contribFailed = 0, feeFailed = 0;
     for (var i = 0; i < selected.length; i++) {
       var memberId = selected[i];
+
+      // ── 1. Contribution (enrollment) — independent of the fee record. ──
+      // A failure here must NOT prevent the fee record (the actual due) from
+      // being written, so it has its own try/catch.
       try {
         var existing = await DB.getContributionByMember(memberId);
         if (existing) {
@@ -230,8 +235,10 @@ const Contributions = (function () {
           await DB.addContribution(newContrib);
           enrolled++;
         }
+      } catch (e) { contribFailed++; console.error('[bulkApply] contribution failed for', memberId, e); }
 
-        // Create or overwrite monthly fee record for this member+date
+      // ── 2. Fee record (the due) — runs regardless of contribution outcome. ──
+      try {
         var existingFeeRecord = await DB.getMonthlyFeeRecordByMemberDate(memberId, date);
         if (existingFeeRecord) {
           // Same member + same date → overwrite fee amount
@@ -255,7 +262,7 @@ const Contributions = (function () {
           await DB.addMonthlyFeeRecord(feeRecord);
           feeCreated++;
         }
-      } catch (e) { failed++; console.error(e); }
+      } catch (e) { feeFailed++; console.error('[bulkApply] fee record failed for', memberId, e); }
     }
 
     // Clear selection
@@ -264,15 +271,24 @@ const Contributions = (function () {
     if (allCb) allCb.checked = false;
 
     var resultParts = [];
-    if (updated > 0)     resultParts.push(updated + ' updated');
-    if (enrolled > 0)    resultParts.push(enrolled + ' newly enrolled');
-    if (feeCreated > 0)  resultParts.push(feeCreated + ' fee record(s) created');
-    if (failed > 0)      resultParts.push(failed + ' failed');
+    if (updated > 0)       resultParts.push(updated + ' updated');
+    if (enrolled > 0)      resultParts.push(enrolled + ' newly enrolled');
+    if (feeCreated > 0)    resultParts.push(feeCreated + ' fee record(s) created');
+    if (contribFailed > 0) resultParts.push(contribFailed + ' enrollment(s) failed');
+    if (feeFailed > 0)     resultParts.push(feeFailed + ' fee record(s) failed');
 
+    var hadFailure = (contribFailed > 0 || feeFailed > 0);
     if (msgEl) {
-      msgEl.textContent = '✓ ' + resultParts.join(', ');
+      msgEl.textContent = (hadFailure ? '⚠️ ' : '✓ ') + resultParts.join(', ');
       msgEl.removeAttribute('hidden');
-      setTimeout(function () { msgEl.setAttribute('hidden', ''); }, 4000);
+      // Surface failures prominently and keep them visible longer.
+      if (hadFailure && errEl) {
+        errEl.textContent = 'Some records could not be saved (' +
+          (contribFailed > 0 ? contribFailed + ' enrollment(s) ' : '') +
+          (feeFailed > 0 ? feeFailed + ' fee record(s)' : '') +
+          '). See console for details.';
+      }
+      setTimeout(function () { msgEl.setAttribute('hidden', ''); }, hadFailure ? 8000 : 4000);
     }
 
     renderContribList();

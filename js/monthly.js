@@ -49,9 +49,11 @@ const Monthly = (function () {
   // This ensures balance reflects real fee applications, not theoretical period counting.
   // balance > 0 → amount owed; balance < 0 → advance credit.
   async function calcMemberBalance(member, contrib, refDate) {
-    if (!contrib || !contrib.activationDate) return { totalOwed: 0, totalPaid: 0, balance: 0, periods: [], currentPeriod: null };
-
-    var currentPeriod = getPeriodForDate(refDate, contrib);
+    // Fee records are the source of truth for dues. A member can owe money even
+    // without a saved contribution row (e.g. a fee was applied but enrollment
+    // failed to persist), so compute from payments + fee records first and only
+    // treat the absence of BOTH as "nothing owed".
+    var currentPeriod = (contrib && contrib.activationDate) ? getPeriodForDate(refDate, contrib) : null;
 
     // Sum all monthly payments up to refDate
     var payments = await DB.getPaymentsByMember(member.id);
@@ -64,6 +66,12 @@ const Monthly = (function () {
     var feeRecords = await DB.getMonthlyFeeRecordsByMember(member.id);
     var applicableFees = feeRecords.filter(function (r) { return r.date <= refDate; });
     var totalOwed = applicableFees.reduce(function (s, r) { return s + (r.fee || 0); }, 0);
+
+    // No fee records AND no usable contribution → genuinely nothing to compute.
+    // (balance reflects any monthly payments as advance credit.)
+    if (applicableFees.length === 0 && (!contrib || !contrib.activationDate)) {
+      return { totalOwed: 0, totalPaid: monthlyPaid, balance: -monthlyPaid, periods: [], currentPeriod: null };
+    }
 
     // If no fee records exist yet, fall back to period-counting so balance
     // still shows for members enrolled before fee-records were introduced.
@@ -129,9 +137,21 @@ const Monthly = (function () {
       var contribMap = {};
       contribs.forEach(function (c) { contribMap[c.memberId] = c; });
 
-      // Only active members with a contribution enrolled
+      // Members who owe/paid monthly fees are identified by having at least one
+      // monthly_fee_record — dues are tracked by fee records, not enrollment.
+      var feeRecords = await DB.getAllMonthlyFeeRecords();
+      var hasFeeRecord = {};
+      var latestFeeByMember = {}; // memberId → { date, fee } of most recent record
+      feeRecords.forEach(function (r) {
+        if (!r.memberId) return;
+        hasFeeRecord[r.memberId] = true;
+        var prev = latestFeeByMember[r.memberId];
+        if (!prev || (r.date || '') >= (prev.date || '')) latestFeeByMember[r.memberId] = r;
+      });
+
+      // Active members with EITHER a contribution OR any fee record.
       members = members.filter(function (m) {
-        return m.status !== 'inactive' && contribMap[m.id];
+        return m.status !== 'inactive' && (contribMap[m.id] || hasFeeRecord[m.id]);
       });
       if (searchTerm) members = members.filter(function (m) { return m.name.toLowerCase().indexOf(searchTerm) !== -1 || (m.memberType && m.memberType.toLowerCase().indexOf(searchTerm) !== -1) || (m.notes && m.notes.toLowerCase().indexOf(searchTerm) !== -1); });
       members.sort(function (a, b) { return a.name.localeCompare(b.name); });
@@ -151,6 +171,10 @@ const Monthly = (function () {
       var html = '';
       items.forEach(function (it) {
         var m = it.member, c = it.contrib, bal = it.bal;
+        // Display/collect fee: contribution's monthly fee when enrolled, else
+        // fall back to the member's most recent fee record amount.
+        var latestFee = latestFeeByMember[m.id];
+        var monthlyFee = (c && c.monthlyFee) ? c.monthlyFee : (latestFee && latestFee.fee ? latestFee.fee : 0);
         var statusClass = bal.balance <= 0 ? ' paid-row' : '';
         var balLabel = bal.balance > 0
           ? '<span class="amount-due">₹' + bal.balance.toFixed(2) + ' due</span>'
@@ -162,14 +186,15 @@ const Monthly = (function () {
         html += '<div class="client-name">' + esc(m.name) + '</div>';
         html += '<div class="client-mobile">' + esc(m.mobile) + '</div>';
         html += '<div class="loan-item-info">';
-        html += '<span class="loan-type-badge badge-monthly">₹' + (c.monthlyFee||0).toFixed(0) + '/mo</span> ';
+        html += '<span class="loan-type-badge badge-monthly">₹' + monthlyFee.toFixed(0) + '/mo</span> ';
+        if (!c) html += '<span class="loan-type-badge badge-guest" style="font-size:0.68rem;">not enrolled</span> ';
         html += balLabel;
         if (bal.currentPeriod) html += ' <span class="loan-notes">Period: ' + esc(bal.currentPeriod.label) + '</span>';
         html += '</div></div>';
         html += '<div class="client-actions">';
-        html += '<button class="btn btn-collect btn-collect-monthly" data-id="' + m.id + '" data-fee="' + (c.monthlyFee||0) + '" data-balance="' + bal.balance + '" data-name="' + esc(m.name) + '">Collect</button>';
+        html += '<button class="btn btn-collect btn-collect-monthly" data-id="' + m.id + '" data-fee="' + monthlyFee + '" data-balance="' + bal.balance + '" data-name="' + esc(m.name) + '">Collect</button>';
         if (bal.balance > 0) {
-          html += '<button class="btn btn-sm btn-whatsapp btn-remind-monthly" data-mobile="' + esc(m.mobile) + '" data-name="' + esc(m.name) + '" data-balance="' + bal.balance + '" data-fee="' + (c.monthlyFee||0) + '">📱</button>';
+          html += '<button class="btn btn-sm btn-whatsapp btn-remind-monthly" data-mobile="' + esc(m.mobile) + '" data-name="' + esc(m.name) + '" data-balance="' + bal.balance + '" data-fee="' + monthlyFee + '">📱</button>';
         }
         html += '</div></div></div>';
       });

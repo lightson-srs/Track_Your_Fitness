@@ -186,7 +186,14 @@ const Reports = (function () {
       var contribMap = {};
       contribs.forEach(function (c) { contribMap[c.memberId] = c; });
 
-      var enrolled = members.filter(function (m) { return m.status !== 'inactive' && contribMap[m.id]; });
+      // Dues are tracked by fee records, so a member can be outstanding without
+      // a contribution row. Include members with EITHER a contribution OR any
+      // monthly_fee_record.
+      var feeRecords = await DB.getAllMonthlyFeeRecords();
+      var hasFeeRecord = {};
+      feeRecords.forEach(function (r) { if (r.memberId) hasFeeRecord[r.memberId] = true; });
+
+      var enrolled = members.filter(function (m) { return m.status !== 'inactive' && (contribMap[m.id] || hasFeeRecord[m.id]); });
       if (searchTerm) enrolled = enrolled.filter(function (m) { return m.name.toLowerCase().indexOf(searchTerm) !== -1; });
       enrolled.sort(function (a, b) { return a.name.localeCompare(b.name); });
 
@@ -242,8 +249,14 @@ const Reports = (function () {
       var contribMap2 = {};
       allContribs.forEach(function (c) { contribMap2[c.memberId] = c; });
 
+      // Match the Outstanding report: dues come from fee records, so include
+      // members with EITHER a contribution OR any monthly_fee_record.
+      var allFeeRecordsB = await DB.getAllMonthlyFeeRecords();
+      var hasFeeRecordB = {};
+      allFeeRecordsB.forEach(function (r) { if (r.memberId) hasFeeRecordB[r.memberId] = true; });
+
       var cumMonthlyOutstanding = 0;
-      var enrolledMembers = allMembers.filter(function (m) { return m.status !== 'inactive' && contribMap2[m.id]; });
+      var enrolledMembers = allMembers.filter(function (m) { return m.status !== 'inactive' && (contribMap2[m.id] || hasFeeRecordB[m.id]); });
       for (var bi = 0; bi < enrolledMembers.length; bi++) {
         var bm = enrolledMembers[bi];
         var bc = contribMap2[bm.id];

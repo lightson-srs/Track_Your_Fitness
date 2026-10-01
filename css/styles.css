@@ -222,7 +222,8 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 .report-table th, .report-table td { overflow: hidden; text-overflow: ellipsis; }
 .report-table th { background: var(--bg3); text-align: left; padding: 8px 10px; color: var(--text2); font-weight: 600; font-size: 0.86rem; text-transform: uppercase; }
 .report-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
-.report-table tr:last-child td { border-bottom: none; }
+.report-table tbody tr:last-child td { border-bottom: none; }
+.report-table tfoot .report-total-row td { border-top: 2px solid var(--border); border-bottom: none; background: var(--bg3); }
 
 /* ── Settings ────────────────────────────────────────── */
 .settings-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }

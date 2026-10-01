@@ -96,6 +96,9 @@
     <div class="date-picker-wrap"><input type="date" id="guest-date" class="date-picker-hidden"><div class="date-picker-display" data-for="guest-date">Select date</div></div>
     <input type="text" id="guest-search" placeholder="Search member…">
   </div>
+  <div class="filter-row">
+    <label><input type="checkbox" id="guest-filter-outstanding" checked> Show outstanding</label>
+  </div>
   <div id="guest-list"></div>
 </main>
 
@@ -384,7 +387,12 @@
       <div class="date-picker-wrap"><input type="date" id="report-start-mw" class="date-picker-hidden"><div class="date-picker-display" data-for="report-start-mw">Select date</div></div>
       <div class="date-picker-wrap"><input type="date" id="report-end-mw" class="date-picker-hidden"><div class="date-picker-display" data-for="report-end-mw">Select date</div></div>
     </div>
-    <input type="text" id="report-search-mw" placeholder="Filter by member…" class="search-input">
+    <div class="filter-bar">
+      <input type="text" id="report-search-mw" placeholder="Filter by member…" style="flex:2;">
+      <select id="report-type-mw" style="flex:1;padding:7px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.9rem;">
+        <option value="all">All types</option>
+      </select>
+    </div>
     <div id="report-output-memberwise"></div>
   </div>
 

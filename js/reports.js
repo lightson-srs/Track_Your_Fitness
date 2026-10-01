@@ -44,6 +44,9 @@ const Reports = (function () {
       var el = document.getElementById(id);
       if (el) el.addEventListener('input', renderActiveReport);
     });
+    // Fee Collection member-type filter
+    var typeMw = document.getElementById('report-type-mw');
+    if (typeMw) typeMw.addEventListener('change', renderActiveReport);
 
     var printBtn = document.getElementById('report-print-btn');
     if (printBtn) printBtn.addEventListener('click', function () { window.print(); });
@@ -149,7 +152,30 @@ const Reports = (function () {
       var payments = start && end ? await DB.getPaymentsByDateRange(start, end) : await DB.getAllPayments();
       var members  = await DB.getAllMembers();
 
+      // Populate the member-type dropdown from the types actually present,
+      // preserving the current selection.
+      var typeSelect = document.getElementById('report-type-mw');
+      var selectedType = typeSelect ? typeSelect.value : 'all';
+      if (typeSelect) {
+        var types = [];
+        members.forEach(function (m) {
+          var t = (m.memberType || 'Regular');
+          if (types.indexOf(t) === -1) types.push(t);
+        });
+        types.sort();
+        var optsHtml = '<option value="all">All types</option>';
+        types.forEach(function (t) {
+          optsHtml += '<option value="' + esc(t) + '"' + (t === selectedType ? ' selected' : '') + '>' + esc(t) + '</option>';
+        });
+        typeSelect.innerHTML = optsHtml;
+        // If the previously selected type no longer exists, fall back to all.
+        if (selectedType !== 'all' && types.indexOf(selectedType) === -1) selectedType = 'all';
+      }
+
       if (searchTerm) members = members.filter(function (m) { return m.name.toLowerCase().indexOf(searchTerm) !== -1; });
+      if (selectedType && selectedType !== 'all') {
+        members = members.filter(function (m) { return (m.memberType || 'Regular') === selectedType; });
+      }
 
       var byMember = {};
       payments.forEach(function (p) {
@@ -159,14 +185,33 @@ const Reports = (function () {
       });
 
       members.sort(function (a, b) { return a.name.localeCompare(b.name); });
-      var grand = payments.reduce(function (s, p) { return s + (p.amount || 0); }, 0);
-      var html  = '<div class="history-summary">Grand total: <strong>₹' + grand.toFixed(2) + '</strong></div>';
+
+      // Totals reflect the filtered member set (so they match the table and the
+      // selected member type), not every payment in range.
+      var totMonthly = 0, totGuest = 0, totAll = 0;
+      members.forEach(function (m) {
+        var row = byMember[m.id] || { monthly: 0, guest_play: 0, total: 0 };
+        totMonthly += row.monthly || 0;
+        totGuest   += row.guest_play || 0;
+        totAll     += row.total || 0;
+      });
+
+      var typeLabel = (selectedType && selectedType !== 'all') ? ' · ' + esc(selectedType) : '';
+      var html  = '<div class="history-summary">Grand total' + typeLabel + ': <strong>₹' + totAll.toFixed(2) + '</strong></div>';
       html += '<table class="report-table"><thead><tr><th>Member</th><th>Monthly</th><th>Sessions</th><th>Total</th></tr></thead><tbody>';
       members.forEach(function (m) {
         var row = byMember[m.id] || { monthly: 0, guest_play: 0, total: 0 };
         html += '<tr><td>' + esc(m.name) + '</td><td>₹' + row.monthly.toFixed(2) + '</td><td>₹' + row.guest_play.toFixed(2) + '</td><td><strong>₹' + row.total.toFixed(2) + '</strong></td></tr>';
       });
-      html += '</tbody></table>';
+      html += '</tbody>';
+      // Consolidated column totals.
+      html += '<tfoot><tr class="report-total-row">' +
+        '<td><strong>Total</strong></td>' +
+        '<td><strong>₹' + totMonthly.toFixed(2) + '</strong></td>' +
+        '<td><strong>₹' + totGuest.toFixed(2) + '</strong></td>' +
+        '<td><strong>₹' + totAll.toFixed(2) + '</strong></td>' +
+        '</tr></tfoot>';
+      html += '</table>';
       container.innerHTML = html;
     } catch (e) { container.innerHTML = '<p class="empty-message">Error loading report.</p>'; console.error(e); }
   }

@@ -168,9 +168,12 @@ const License = (function () {
   }
 
   // --- Public API ---
-  function getMaxMembers()    { return isLicensed() ? Infinity : LIMITS.MAX_MEMBERS; }
-  function getMaxMonthlyFee() { return isLicensed() ? Infinity : LIMITS.MAX_MONTHLY_FEE; }
-  function getMaxGuestFee()   { return isLicensed() ? Infinity : LIMITS.MAX_GUEST_FEE; }
+  // Hard lock: with no valid license nothing is permitted (not a capped free
+  // tier). Licensed → unlimited. These mirror the index.html inline gate.
+  var LICENSE_REQUIRED_MSG = 'A valid license is required to use this app. Please activate a license to continue.';
+  function getMaxMembers()    { return isLicensed() ? Infinity : 0; }
+  function getMaxMonthlyFee() { return isLicensed() ? Infinity : 0; }
+  function getMaxGuestFee()   { return isLicensed() ? Infinity : 0; }
 
   function updateBanner() {
     var banner = document.getElementById('license-banner');
@@ -193,17 +196,17 @@ const License = (function () {
 
   async function checkMemberLimit() {
     if (isLicensed()) return null;
-    return 'License required to add members.';
+    return LICENSE_REQUIRED_MSG;
   }
 
   function checkMonthlyFee(fee) {
     if (isLicensed()) return null;
-    return 'License required.';
+    return LICENSE_REQUIRED_MSG;
   }
 
   function checkGuestFee(fee) {
     if (isLicensed()) return null;
-    return 'License required.';
+    return LICENSE_REQUIRED_MSG;
   }
 
   function init() {

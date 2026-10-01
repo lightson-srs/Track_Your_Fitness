@@ -20,53 +20,30 @@
       } catch (e) { return false; }
     }());
 
-    // Hard limits — single source of truth for entire app
+    // Retained for messaging only. The app is HARD-LOCKED without a valid
+    // license — there is no free tier. license.js shows a full block screen on
+    // startup; these guards are a second, consistent layer: any data-entry
+    // action is refused outright when unlicensed.
     window._LIMITS = { MAX_MEMBERS: 20, MAX_MONTHLY_FEE: 1000, MAX_GUEST_FEE: 1000 };
 
-    // Global guard functions — called from monthly.js, guestplay.js, members.js
+    var _LICENSE_REQUIRED_MSG = 'A valid license is required to use this app.\nPlease activate a license to continue.';
+
+    // Global guard functions — called from monthly.js, guestplay.js, members.js.
+    // Hard lock: when unlicensed, every action is blocked regardless of amount
+    // or member count (consistent with license.js full lockout).
     window._checkMonthlyFee = function (amount) {
       if (window._isLicensed) return null;
-      amount = parseFloat(amount) || 0;
-      if (amount > window._LIMITS.MAX_MONTHLY_FEE) {
-        return 'Unlicensed limit: monthly fee/payment cannot exceed ₹' + window._LIMITS.MAX_MONTHLY_FEE + '.\nYou entered ₹' + amount.toFixed(2) + '.\nActivate a license to remove this restriction.';
-      }
-      return null;
+      return _LICENSE_REQUIRED_MSG;
     };
 
     window._checkGuestFee = function (amount) {
       if (window._isLicensed) return null;
-      amount = parseFloat(amount) || 0;
-      if (amount > window._LIMITS.MAX_GUEST_FEE) {
-        return 'Unlicensed limit: guest fee/payment cannot exceed ₹' + window._LIMITS.MAX_GUEST_FEE + '.\nYou entered ₹' + amount.toFixed(2) + '.\nActivate a license to remove this restriction.';
-      }
-      return null;
+      return _LICENSE_REQUIRED_MSG;
     };
 
     window._checkMemberLimit = async function () {
       if (window._isLicensed) return null;
-      try {
-        // Count active members directly from IndexedDB
-        var count = await new Promise(function (resolve) {
-          var req = indexedDB.open('TrackYourFitness');
-          req.onsuccess = function (e) {
-            var db = e.target.result;
-            if (!db.objectStoreNames.contains('members')) { resolve(0); return; }
-            var tx    = db.transaction('members', 'readonly');
-            var store = tx.objectStore('members');
-            var all   = store.getAll();
-            all.onsuccess = function () {
-              var active = (all.result || []).filter(function (m) { return m.status !== 'inactive'; });
-              resolve(active.length);
-            };
-            all.onerror = function () { resolve(0); };
-          };
-          req.onerror = function () { resolve(0); };
-        });
-        if (count >= window._LIMITS.MAX_MEMBERS) {
-          return 'Unlicensed limit reached: max ' + window._LIMITS.MAX_MEMBERS + ' active members.\nActivate a license to add more.';
-        }
-      } catch (e) {}
-      return null;
+      return _LICENSE_REQUIRED_MSG;
     };
   </script>
   <meta charset="UTF-8">
@@ -175,23 +152,8 @@
       </div>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary" onclick="
-  var isEdit = document.getElementById('member-form-title').textContent.toLowerCase().includes('edit');
-  if(!isEdit){
-    if(!window._isLicensed){
-      var req=indexedDB.open('TrackYourFitness');
-      req.onsuccess=function(e){
-        var db=e.target.result;
-        if(!db.objectStoreNames.contains('members')){return;}
-        var tx=db.transaction('members','readonly');
-        var all=tx.objectStore('members').getAll();
-        all.onsuccess=function(){
-          var active=(all.result||[]).filter(function(m){return m.status!=='inactive';});
-          if(active.length>=20){
-            alert('Unlicensed limit: max 20 active members.\nActivate a license to add more.');
-          }
-        };
-      };
-    }
+  if(!window._isLicensed){
+    alert('A valid license is required to use this app.\nPlease activate a license to continue.');
   }
 ">Save</button>
         <button type="button" class="btn btn-secondary" id="member-cancel-btn">Cancel</button>
@@ -353,6 +315,9 @@
   <div class="bulk-select-all-row">
     <label><input type="checkbox" id="att-select-all"> Select all visible</label>
     <span id="att-present-count" class="bulk-count">0 present</span>
+  </div>
+  <div class="filter-row">
+    <label><input type="checkbox" id="att-include-inactive"> Include deactivated members</label>
   </div>
   <div class="att-filter-group" style="display:flex;gap:4px;margin-bottom:4px;">
     <button class="btn btn-sm att-filter-btn active" data-filter="absent">Absent</button>
@@ -666,14 +631,11 @@
     <div class="form-group">
       <label for="monthly-payment-amount">Amount (₹)</label>
       <input type="number" id="monthly-payment-amount" min="0.01" step="0.01" inputmode="decimal" style="font-size:1.1rem;font-weight:600;"
-  oninput="(function(el){
-    if(!window._isLicensed&&parseFloat(el.value)>1000){el.value=1000;el.style.borderColor='var(--danger)';}else{el.style.borderColor='';}
-  })(this)">
+  oninput="(function(el){ el.style.borderColor = window._isLicensed ? '' : 'var(--danger)'; })(this)">
     </div>
     <div class="form-actions">
       <button class="btn btn-primary" id="monthly-confirm-btn" onclick="
-  var amt = parseFloat(document.getElementById('monthly-payment-amount').value)||0;
-  if(!window._isLicensed && amt > 1000){ alert('Unlicensed limit: monthly payment cannot exceed ₹1000.\nYou entered ₹'+amt.toFixed(2)+'.\nActivate a license to remove this restriction.'); event.stopImmediatePropagation(); return false; }
+  if(!window._isLicensed){ alert('A valid license is required to use this app.\nPlease activate a license to continue.'); event.stopImmediatePropagation(); return false; }
 ">Confirm payment</button>
       <button class="btn btn-secondary" id="monthly-cancel-btn">Cancel</button>
     </div>
@@ -690,14 +652,11 @@
     <div class="form-group">
       <label for="guest-payment-amount">Amount (₹)</label>
       <input type="number" id="guest-payment-amount" min="0.01" step="0.01" inputmode="decimal" style="font-size:1.1rem;font-weight:600;"
-  oninput="(function(el){
-    if(!window._isLicensed&&parseFloat(el.value)>1000){el.value=1000;el.style.borderColor='var(--danger)';}else{el.style.borderColor='';}
-  })(this)">
+  oninput="(function(el){ el.style.borderColor = window._isLicensed ? '' : 'var(--danger)'; })(this)">
     </div>
     <div class="form-actions">
       <button class="btn btn-primary" id="guest-confirm-btn" onclick="
-  var amt = parseFloat(document.getElementById('guest-payment-amount').value)||0;
-  if(!window._isLicensed && amt > 1000){ alert('Unlicensed limit: guest payment cannot exceed ₹1000.\nYou entered ₹'+amt.toFixed(2)+'.\nActivate a license to remove this restriction.'); event.stopImmediatePropagation(); return false; }
+  if(!window._isLicensed){ alert('A valid license is required to use this app.\nPlease activate a license to continue.'); event.stopImmediatePropagation(); return false; }
 ">Confirm payment</button>
       <button class="btn btn-secondary" id="guest-cancel-btn">Cancel</button>
     </div>

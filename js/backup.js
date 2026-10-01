@@ -98,6 +98,14 @@ const Backup = (function () {
         var data = JSON.parse(ev.target.result);
         if (!data || !data.data) { alert('Invalid backup file.'); return; }
 
+        // Hard lock: restoring data requires a valid license. (Normally the
+        // app is blocked before reaching here, but guard explicitly so an
+        // unlicensed restore can never partially overwrite data.)
+        if (typeof License !== 'undefined' && !License.isLicensed()) {
+          alert('A valid license is required to restore a backup.\nPlease activate a license and try again.');
+          return;
+        }
+
         var {
           members        = [],
           contributions  = [],
@@ -136,46 +144,28 @@ const Backup = (function () {
         var remainingAtt = await DB.getAllAttendance();
         for (var at of remainingAtt) await DB.deleteAttendance(at.id);
 
-        // ── Restore in dependency order — enforce license limits ──
-        var maxMembers   = License.getMaxMembers();
-        var activeCount  = 0;
-        var skippedMembers = 0;
-
+        // ── Restore in dependency order ──
+        // Licensed users get a faithful, unclamped restore (hard-lock model:
+        // either fully licensed with no limits, or blocked entirely).
         for (var member of members) {
-          if (member.status !== 'inactive') {
-            if (activeCount >= maxMembers) { skippedMembers++; continue; }
-            activeCount++;
-          }
           await DB.addMember(member);
         }
 
-        // Clamp fees on contributions to license limits
         for (var contrib of contributions) {
-          if (License.checkMonthlyFee(contrib.monthlyFee || 0))
-            contrib.monthlyFee = License.LIMITS.MAX_MONTHLY_FEE;
-          if (License.checkGuestFee(contrib.guestFee || 0))
-            contrib.guestFee   = License.LIMITS.MAX_GUEST_FEE;
           await DB.addContribution(contrib);
         }
 
-        // Clamp payment/session amounts
         for (var payment of payments) {
-          if (payment.type === 'monthly'    && License.checkMonthlyFee(payment.amount || 0))
-            payment.amount = License.LIMITS.MAX_MONTHLY_FEE;
-          if (payment.type === 'guest_play' && License.checkGuestFee(payment.amount || 0))
-            payment.amount = License.LIMITS.MAX_GUEST_FEE;
           await DB.addPayment(payment);
         }
 
         for (var expense  of expenses)      await DB.addExpense(expense);
 
         for (var gs of guestSessions) {
-          if (License.checkGuestFee(gs.fee || 0)) gs.fee = License.LIMITS.MAX_GUEST_FEE;
           await DB.addGuestSession(gs);
         }
 
         for (var mfr of monthlyFeeRecs) {
-          if (License.checkMonthlyFee(mfr.fee || 0)) mfr.fee = License.LIMITS.MAX_MONTHLY_FEE;
           await DB.addMonthlyFeeRecord(mfr);
         }
 
@@ -201,26 +191,20 @@ const Backup = (function () {
           }
         }
 
-        if (skippedMembers > 0) {
-          alert('Note: ' + skippedMembers + ' member(s) were skipped — unlicensed limit of ' + maxMembers + ' active members reached. Fees above limits were capped automatically.');
-        }
-
         // ── Restore settings ──
         Settings.restoreSettings(settings);
         Settings.applyTheme();
         Settings.updateAppNameDisplay();
 
-        if (!skippedMembers) {
-          alert('Restore complete!\n\n' +
-            '  Members:        ' + members.length        + '\n' +
-            '  Contributions:  ' + contributions.length  + '\n' +
-            '  Payments:       ' + payments.length       + '\n' +
-            '  Expenses:       ' + expenses.length       + '\n' +
-            '  Guest sessions: ' + guestSessions.length  + '\n' +
-            '  Fee records:    ' + monthlyFeeRecs.length + '\n' +
-            '  Attendance:     ' + attendance.length     + '\n' +
-            '  Firestore config: ' + (firestoreConfig ? 'Yes' : 'No'));
-        }
+        alert('Restore complete!\n\n' +
+          '  Members:        ' + members.length        + '\n' +
+          '  Contributions:  ' + contributions.length  + '\n' +
+          '  Payments:       ' + payments.length       + '\n' +
+          '  Expenses:       ' + expenses.length       + '\n' +
+          '  Guest sessions: ' + guestSessions.length  + '\n' +
+          '  Fee records:    ' + monthlyFeeRecs.length + '\n' +
+          '  Attendance:     ' + attendance.length     + '\n' +
+          '  Firestore config: ' + (firestoreConfig ? 'Yes' : 'No'));
 
         Settings.setLastBackup(getTodayISO());
         displayLastBackupInfo();

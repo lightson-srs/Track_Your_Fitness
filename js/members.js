@@ -419,14 +419,9 @@ const Members = (function () {
             var activationDate = (cols[idx('activationdate')] || '').trim() || null;
             var dueDay         = parseInt(cols[idx('dueday')], 10)        || null;
 
-            // Clamp fees to license limits
-            if (monthlyFee && License.checkMonthlyFee(monthlyFee)) {
-              monthlyFee = License.LIMITS.MAX_MONTHLY_FEE;
-            }
-            if (guestFee && License.checkGuestFee(guestFee)) {
-              guestFee = License.LIMITS.MAX_GUEST_FEE;
-            }
-
+            // Hard lock: import is only reachable while licensed (unlicensed is
+            // caught by the checkMemberLimit guard above), so fees are imported
+            // as-is with no free-tier clamping.
             if (monthlyFee || guestFee || activationDate) {
               var contrib = {
                 id:             DB.generateId(),

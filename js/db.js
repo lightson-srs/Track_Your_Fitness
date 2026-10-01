@@ -112,18 +112,36 @@ const DB = (function () {
     }
   }
 
+  // ─── Sync V2 record stamping ───
+  // Every synced record is identified by its stable `id` and carries its own
+  // version/timestamp so sync can resolve conflicts and build version history
+  // without relying on array position. Mutates and returns the record.
+  //
+  // When the sync engine writes records it pulled from the server, it must NOT
+  // re-stamp them (that would bump the version and corrupt the authoritative
+  // remote value). The sync engine toggles _suppressStamp around those writes.
+  var _suppressStamp = false;
+  function setSuppressStamp(on) { _suppressStamp = !!on; }
+  function stampRecord(record) {
+    if (_suppressStamp) return record;
+    if (!record || typeof record !== 'object') return record;
+    record.updatedAt = Date.now();
+    record.version = (typeof record.version === 'number' ? record.version : 0) + 1;
+    return record;
+  }
+
   // ─── Members ───
-  function addMember(m)    { return reqToPromise(getStore('members','readwrite').add(m)).then(function(r) { notifySyncIfAvailable('members', m, 'put'); return r; }); }
+  function addMember(m)    { stampRecord(m); return reqToPromise(getStore('members','readwrite').add(m)).then(function(r) { notifySyncIfAvailable('members', m, 'put'); return r; }); }
   function getMember(id)   { return reqToPromise(getStore('members','readonly').get(id)); }
   function getAllMembers()  { return reqToPromise(getStore('members','readonly').getAll()); }
-  function updateMember(m) { return reqToPromise(getStore('members','readwrite').put(m)).then(function(r) { notifySyncIfAvailable('members', m, 'put'); return r; }); }
+  function updateMember(m) { stampRecord(m); return reqToPromise(getStore('members','readwrite').put(m)).then(function(r) { notifySyncIfAvailable('members', m, 'put'); return r; }); }
   function deleteMember(id){ return reqToPromise(getStore('members','readwrite').delete(id)).then(function(r) { notifySyncIfAvailable('members', {id:id}, 'delete'); return r; }); }
 
   // ─── Contributions ───
-  function addContribution(c)    { return reqToPromise(getStore('contributions','readwrite').add(c)).then(function(r) { notifySyncIfAvailable('contributions', c, 'put'); return r; }); }
+  function addContribution(c)    { stampRecord(c); return reqToPromise(getStore('contributions','readwrite').add(c)).then(function(r) { notifySyncIfAvailable('contributions', c, 'put'); return r; }); }
   function getContribution(id)   { return reqToPromise(getStore('contributions','readonly').get(id)); }
   function getAllContributions()  { return reqToPromise(getStore('contributions','readonly').getAll()); }
-  function updateContribution(c) { return reqToPromise(getStore('contributions','readwrite').put(c)).then(function(r) { notifySyncIfAvailable('contributions', c, 'put'); return r; }); }
+  function updateContribution(c) { stampRecord(c); return reqToPromise(getStore('contributions','readwrite').put(c)).then(function(r) { notifySyncIfAvailable('contributions', c, 'put'); return r; }); }
   function deleteContribution(id){ return reqToPromise(getStore('contributions','readwrite').delete(id)).then(function(r) { notifySyncIfAvailable('contributions', {id:id}, 'delete'); return r; }); }
   function getContributionByMember(memberId) {
     return new Promise((resolve, reject) => {
@@ -134,10 +152,10 @@ const DB = (function () {
   }
 
   // ─── Payments ───
-  function addPayment(p)    { return reqToPromise(getStore('payments','readwrite').add(p)).then(function(r) { notifySyncIfAvailable('payments', p, 'put'); return r; }); }
+  function addPayment(p)    { stampRecord(p); return reqToPromise(getStore('payments','readwrite').add(p)).then(function(r) { notifySyncIfAvailable('payments', p, 'put'); return r; }); }
   function getPayment(id)   { return reqToPromise(getStore('payments','readonly').get(id)); }
   function getAllPayments()  { return reqToPromise(getStore('payments','readonly').getAll()); }
-  function updatePayment(p) { return reqToPromise(getStore('payments','readwrite').put(p)).then(function(r) { notifySyncIfAvailable('payments', p, 'put'); return r; }); }
+  function updatePayment(p) { stampRecord(p); return reqToPromise(getStore('payments','readwrite').put(p)).then(function(r) { notifySyncIfAvailable('payments', p, 'put'); return r; }); }
   function deletePayment(id){ return reqToPromise(getStore('payments','readwrite').delete(id)).then(function(r) { notifySyncIfAvailable('payments', {id:id}, 'delete'); return r; }); }
   function getPaymentsByMember(memberId) {
     return cursorCollect(getStore('payments','readonly'), 'memberId', IDBKeyRange.only(memberId));
@@ -157,20 +175,20 @@ const DB = (function () {
   }
 
   // ─── Expenses ───
-  function addExpense(ex)    { return reqToPromise(getStore('expenses','readwrite').add(ex)).then(function(r) { notifySyncIfAvailable('expenses', ex, 'put'); return r; }); }
+  function addExpense(ex)    { stampRecord(ex); return reqToPromise(getStore('expenses','readwrite').add(ex)).then(function(r) { notifySyncIfAvailable('expenses', ex, 'put'); return r; }); }
   function getExpense(id)    { return reqToPromise(getStore('expenses','readonly').get(id)); }
   function getAllExpenses()   { return reqToPromise(getStore('expenses','readonly').getAll()); }
-  function updateExpense(ex) { return reqToPromise(getStore('expenses','readwrite').put(ex)).then(function(r) { notifySyncIfAvailable('expenses', ex, 'put'); return r; }); }
+  function updateExpense(ex) { stampRecord(ex); return reqToPromise(getStore('expenses','readwrite').put(ex)).then(function(r) { notifySyncIfAvailable('expenses', ex, 'put'); return r; }); }
   function deleteExpense(id) { return reqToPromise(getStore('expenses','readwrite').delete(id)).then(function(r) { notifySyncIfAvailable('expenses', {id:id}, 'delete'); return r; }); }
   function getExpensesByDateRange(start, end) {
     return cursorCollect(getStore('expenses','readonly'), 'date', IDBKeyRange.bound(start, end));
   }
 
   // ─── Monthly Fee Records ───
-  function addMonthlyFeeRecord(r)    { return reqToPromise(getStore('monthly_fee_records','readwrite').add(r)).then(function(res) { notifySyncIfAvailable('monthly_fee_records', r, 'put'); return res; }); }
+  function addMonthlyFeeRecord(r)    { stampRecord(r); return reqToPromise(getStore('monthly_fee_records','readwrite').add(r)).then(function(res) { notifySyncIfAvailable('monthly_fee_records', r, 'put'); return res; }); }
   function getMonthlyFeeRecord(id)   { return reqToPromise(getStore('monthly_fee_records','readonly').get(id)); }
   function getAllMonthlyFeeRecords()  { return reqToPromise(getStore('monthly_fee_records','readonly').getAll()); }
-  function updateMonthlyFeeRecord(r) { return reqToPromise(getStore('monthly_fee_records','readwrite').put(r)).then(function(res) { notifySyncIfAvailable('monthly_fee_records', r, 'put'); return res; }); }
+  function updateMonthlyFeeRecord(r) { stampRecord(r); return reqToPromise(getStore('monthly_fee_records','readwrite').put(r)).then(function(res) { notifySyncIfAvailable('monthly_fee_records', r, 'put'); return res; }); }
   function deleteMonthlyFeeRecord(id){ return reqToPromise(getStore('monthly_fee_records','readwrite').delete(id)).then(function(res) { notifySyncIfAvailable('monthly_fee_records', {id:id}, 'delete'); return res; }); }
   function getMonthlyFeeRecordsByMember(memberId) {
     return cursorCollect(getStore('monthly_fee_records','readonly'), 'memberId', IDBKeyRange.only(memberId));
@@ -198,10 +216,10 @@ const DB = (function () {
   }
 
   // ─── Guest Sessions ───
-  function addGuestSession(s)    { return reqToPromise(getStore('guest_sessions','readwrite').add(s)).then(function(r) { notifySyncIfAvailable('guest_sessions', s, 'put'); return r; }); }
+  function addGuestSession(s)    { stampRecord(s); return reqToPromise(getStore('guest_sessions','readwrite').add(s)).then(function(r) { notifySyncIfAvailable('guest_sessions', s, 'put'); return r; }); }
   function getGuestSession(id)   { return reqToPromise(getStore('guest_sessions','readonly').get(id)); }
   function getAllGuestSessions()  { return reqToPromise(getStore('guest_sessions','readonly').getAll()); }
-  function updateGuestSession(s) { return reqToPromise(getStore('guest_sessions','readwrite').put(s)).then(function(r) { notifySyncIfAvailable('guest_sessions', s, 'put'); return r; }); }
+  function updateGuestSession(s) { stampRecord(s); return reqToPromise(getStore('guest_sessions','readwrite').put(s)).then(function(r) { notifySyncIfAvailable('guest_sessions', s, 'put'); return r; }); }
   function deleteGuestSession(id){ return reqToPromise(getStore('guest_sessions','readwrite').delete(id)).then(function(r) { notifySyncIfAvailable('guest_sessions', {id:id}, 'delete'); return r; }); }
   function getGuestSessionsByMember(memberId) {
     return cursorCollect(getStore('guest_sessions','readonly'), 'memberId', IDBKeyRange.only(memberId));
@@ -221,10 +239,10 @@ const DB = (function () {
   }
 
   // ─── Attendance ───
-  function addAttendance(record)    { return reqToPromise(getStore('attendance','readwrite').add(record)).then(function(r) { notifySyncIfAvailable('attendance', record, 'put'); return r; }); }
+  function addAttendance(record)    { stampRecord(record); return reqToPromise(getStore('attendance','readwrite').add(record)).then(function(r) { notifySyncIfAvailable('attendance', record, 'put'); return r; }); }
   function getAttendance(id)        { return reqToPromise(getStore('attendance','readonly').get(id)); }
   function getAllAttendance()        { return reqToPromise(getStore('attendance','readonly').getAll()); }
-  function updateAttendance(record)  { return reqToPromise(getStore('attendance','readwrite').put(record)).then(function(r) { notifySyncIfAvailable('attendance', record, 'put'); return r; }); }
+  function updateAttendance(record)  { stampRecord(record); return reqToPromise(getStore('attendance','readwrite').put(record)).then(function(r) { notifySyncIfAvailable('attendance', record, 'put'); return r; }); }
   function deleteAttendance(id)      { return reqToPromise(getStore('attendance','readwrite').delete(id)).then(function(r) { notifySyncIfAvailable('attendance', {id:id}, 'delete'); return r; }); }
   function getAttendanceByMember(memberId) {
     return cursorCollect(getStore('attendance','readonly'), 'memberId', IDBKeyRange.only(memberId));
@@ -305,7 +323,7 @@ const DB = (function () {
   }
 
   return {
-    init, generateId,
+    init, generateId, setSuppressStamp,
     addMember, getMember, getAllMembers, updateMember, deleteMember,
     addContribution, getContribution, getAllContributions, updateContribution,
     deleteContribution, getContributionByMember,

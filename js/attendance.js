@@ -14,6 +14,7 @@ const Attendance = (function () {
     var dateInput      = document.getElementById('att-date');
     var searchInput    = document.getElementById('att-search');
     var selectAllCb    = document.getElementById('att-select-all');
+    var includeInactiveCb = document.getElementById('att-include-inactive');
     var copyYesterday  = document.getElementById('att-copy-yesterday-btn');
     var scanQrBtn      = document.getElementById('att-scan-qr-btn');
     var saveBtn        = document.getElementById('att-save-btn');
@@ -23,6 +24,7 @@ const Attendance = (function () {
       dateInput.addEventListener('change', renderAttendance);
     }
     if (searchInput) searchInput.addEventListener('input', renderAttendance);
+    if (includeInactiveCb) includeInactiveCb.addEventListener('change', renderAttendance);
     if (selectAllCb) selectAllCb.addEventListener('change', function () { toggleSelectAll(selectAllCb.checked); });
     if (copyYesterday) copyYesterday.addEventListener('click', showCopyDateModal);
     if (scanQrBtn) scanQrBtn.addEventListener('click', toggleQRScanner);
@@ -122,12 +124,17 @@ const Attendance = (function () {
 
     var date        = dateInput ? dateInput.value : getTodayISO();
     var searchTerm  = searchInput ? searchInput.value.trim().toLowerCase() : '';
+    var includeInactiveCb = document.getElementById('att-include-inactive');
+    var includeInactive = includeInactiveCb ? includeInactiveCb.checked : false;
 
     container.innerHTML = '<p class="empty-message">Loading…</p>';
 
     try {
       var members = await DB.getAllMembers();
-      members = members.filter(function (m) { return m.status !== 'inactive'; });
+      // By default only active members. When "Include deactivated members" is
+      // checked, inactive members are listed and searchable too — marking them
+      // present (manually or via QR) auto-reactivates them.
+      if (!includeInactive) members = members.filter(function (m) { return m.status !== 'inactive'; });
 
       if (searchTerm) {
         members = members.filter(function (m) {
@@ -153,13 +160,17 @@ const Attendance = (function () {
       members.forEach(function (m) {
         var isPresent = attMap[m.id] === 'present';
         if (isPresent) presentCount++;
+        var isInactive = m.status === 'inactive';
 
-        html += '<div class="att-member-row' + (isPresent ? ' att-present' : '') + '">';
+        html += '<div class="att-member-row' + (isPresent ? ' att-present' : '') + (isInactive ? ' member-inactive' : '') + '">';
         html += '<label class="att-member-label">';
         html += '<input type="checkbox" class="att-checkbox" data-member-id="' + m.id + '"' + (isPresent ? ' checked' : '') + '>';
         html += '<span class="att-member-name">' + esc(m.name) + '</span>';
         if (m.memberType && m.memberType !== 'Regular') {
           html += ' <span class="loan-type-badge badge-monthly" style="font-size:0.7rem;">' + esc(m.memberType) + '</span>';
+        }
+        if (isInactive) {
+          html += ' <span class="loan-type-badge badge-guest" style="font-size:0.68rem;">deactivated</span>';
         }
         html += '</label>';
         html += '<span class="att-status-label ' + (isPresent ? 'att-status-present' : 'att-status-absent') + '">' + (isPresent ? '✅ Present' : '') + '</span>';
@@ -246,13 +257,22 @@ const Attendance = (function () {
     if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
 
     var checkboxes = document.querySelectorAll('.att-checkbox');
-    var saved = 0, errors = 0;
+    var saved = 0, errors = 0, reactivated = 0;
 
     for (var i = 0; i < checkboxes.length; i++) {
       var cb = checkboxes[i];
       var memberId = cb.dataset.memberId;
       var status = cb.checked ? 'present' : 'absent';
       try {
+        // Marking a deactivated member present reactivates them automatically.
+        if (status === 'present') {
+          var member = await DB.getMember(memberId);
+          if (member && member.status === 'inactive') {
+            member.status = 'active';
+            try { await DB.updateMember(member); reactivated++; }
+            catch (e) { console.error('Could not reactivate member', memberId, e); }
+          }
+        }
         await DB.saveAttendance(memberId, date, status);
         saved++;
       } catch (e) {
@@ -264,7 +284,9 @@ const Attendance = (function () {
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '💾 Save Attendance'; }
 
     if (errors > 0) {
-      alert('Saved ' + saved + ' records. ' + errors + ' failed.');
+      alert('Saved ' + saved + ' records' + (reactivated > 0 ? ', ' + reactivated + ' reactivated' : '') + '. ' + errors + ' failed.');
+    } else if (reactivated > 0) {
+      alert('Saved ' + saved + ' records. ' + reactivated + ' deactivated member(s) reactivated.');
     } else {
       if (msgEl) { msgEl.removeAttribute('hidden'); setTimeout(function () { msgEl.setAttribute('hidden', ''); }, 2500); }
     }
@@ -336,6 +358,8 @@ const Attendance = (function () {
     }
 
     try {
+      // QR encodes the member id → direct ID lookup finds the member regardless
+      // of status. If the member is deactivated, reactivate and mark present.
       var member = await DB.getMember(decodedText);
       if (!member) {
         showScanToast('error', 'Member not recognised', 'Unknown QR code. Try scanning again.');
@@ -344,6 +368,15 @@ const Attendance = (function () {
       }
 
       var today = getTodayISO();
+
+      // Scanning a deactivated member reactivates them automatically.
+      var reactivated = false;
+      if (member.status === 'inactive') {
+        member.status = 'active';
+        try { await DB.updateMember(member); reactivated = true; }
+        catch (e) { console.error('Could not reactivate member on scan', member.id, e); }
+      }
+
       await DB.saveAttendance(member.id, today, 'present');
 
       var dueText = '';
@@ -360,7 +393,8 @@ const Attendance = (function () {
       }
 
       var typeLabel = (member.memberType && member.memberType !== 'Regular') ? ' (' + member.memberType + ')' : '';
-      showScanToast('success', member.name + typeLabel + ' — attendance marked!', dueText);
+      var markedMsg = reactivated ? ' — reactivated & marked present!' : ' — attendance marked!';
+      showScanToast('success', member.name + typeLabel + markedMsg, dueText);
 
       renderAttendance();
       resumeScannerAfterDelay();

@@ -21,6 +21,78 @@ const Settings = (function () {
   }
   function set(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
 
+  // ═══ Activity log (Cloud Sync) ═══════════════════════════════
+  // Mirrors the Lights On project: a small, persisted, newest-first log of the
+  // last 40 sync/test-connection activities, rendered into #sync-log-list.
+  var LOG_KEY = 'tyf_sync_log';
+  var LOG_MAX = 40;
+
+  function _loadLog() {
+    try { var raw = localStorage.getItem(LOG_KEY); return raw ? JSON.parse(raw) : []; }
+    catch (e) { return []; }
+  }
+  function _saveLog(arr) {
+    try { localStorage.setItem(LOG_KEY, JSON.stringify(arr)); } catch (e) {}
+  }
+
+  // status: 'ok' | 'err'. msg: short description.
+  function logActivity(status, msg) {
+    var now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    var arr = _loadLog();
+    arr.unshift({ time: now, msg: String(msg), status: (status === 'ok' ? 'ok' : 'err') });
+    if (arr.length > LOG_MAX) arr = arr.slice(0, LOG_MAX);
+    _saveLog(arr);
+    renderLog();
+    // Mirror to console for deeper debugging.
+    try { console.log('[SYNC-LOG]', status, msg); } catch (e) {}
+  }
+
+  function clearLog() {
+    _saveLog([]);
+    renderLog();
+  }
+
+  function esc(s) {
+    return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') : '';
+  }
+
+  function renderLog() {
+    var el = document.getElementById('sync-log-list');
+    if (!el) return;
+    var arr = _loadLog();
+    if (!arr.length) { el.innerHTML = '<div class="log-empty">No activity yet</div>'; return; }
+    el.innerHTML = arr.map(function (l) {
+      return '<div class="log-entry">' +
+        '<span class="log-time">' + esc(l.time) + '</span>' +
+        '<span class="log-cmd">' + esc(l.msg) + '</span>' +
+        '<span class="log-status ' + (l.status === 'ok' ? 'ok' : 'err') + '">' + (l.status === 'ok' ? '✓' : '✗') + '</span>' +
+        '</div>';
+    }).join('');
+  }
+
+  // ─── Sync conflicts (optimistic concurrency: reject-and-flag) ───
+  var _storeLabels = {
+    members: 'Member', contributions: 'Contribution', payments: 'Payment',
+    expenses: 'Expense', guest_sessions: 'Session', monthly_fee_records: 'Fee record',
+    attendance: 'Attendance'
+  };
+
+  function renderConflicts() {
+    var wrap = document.getElementById('sync-conflicts-wrap');
+    var list = document.getElementById('sync-conflicts-list');
+    if (!wrap || !list) return;
+    var conflicts = (typeof SyncEngine !== 'undefined' && SyncEngine.getConflicts) ? SyncEngine.getConflicts() : [];
+    if (!conflicts.length) { wrap.setAttribute('hidden', ''); list.innerHTML = ''; return; }
+    wrap.removeAttribute('hidden');
+    list.innerHTML = conflicts.map(function (c) {
+      var label = _storeLabels[c.store] || c.store;
+      var when = c.at ? new Date(c.at).toLocaleString() : '';
+      return '<div class="sync-conflict-entry"><strong>' + esc(label) + '</strong> ' +
+        esc((c.docId || '').slice(0, 8)) + '… — ' + esc(c.reason || 'changed on another device') +
+        (when ? ' <span class="loan-notes">(' + esc(when) + ')</span>' : '') + '</div>';
+    }).join('');
+  }
+
   function getAppName()            { return get(KEYS.APP_NAME, DEFAULTS.APP_NAME); }
   function setAppName(v)           { set(KEYS.APP_NAME, (v || '').trim() || DEFAULTS.APP_NAME); }
   function getUpiId()              { return get(KEYS.UPI_ID, ''); }
@@ -154,6 +226,9 @@ const Settings = (function () {
     var syncToggle = document.getElementById('sync-toggle');
     var syncSaveBtn = document.getElementById('sync-settings-save-btn');
     var syncTestBtn = document.getElementById('sync-test-btn');
+    var syncFullBtn = document.getElementById('sync-fullsync-btn');
+    var syncLogClear = document.getElementById('sync-log-clear');
+    var syncConflictsClear = document.getElementById('sync-conflicts-clear');
 
     // Populate fields
     populateSyncFields();
@@ -166,10 +241,19 @@ const Settings = (function () {
       if (syncToggle)  syncToggle.addEventListener('change', handleSyncToggle);
       if (syncSaveBtn) syncSaveBtn.addEventListener('click', handleSyncSave);
       if (syncTestBtn) syncTestBtn.addEventListener('click', handleSyncTest);
+      if (syncFullBtn) syncFullBtn.addEventListener('click', handleFullSync);
+      if (syncLogClear) syncLogClear.addEventListener('click', clearLog);
+      if (syncConflictsClear && typeof SyncEngine !== 'undefined' && SyncEngine.clearConflicts) {
+        syncConflictsClear.addEventListener('click', function () { SyncEngine.clearConflicts(); renderConflicts(); });
+      }
+      // Keep the conflict panel live as conflicts are flagged during sync.
+      document.addEventListener('tyf-sync-conflict', renderConflicts);
       _syncSettingsBound = true;
     }
 
-    // Update status display
+    // Render the activity log, conflicts, and update status display.
+    renderLog();
+    renderConflicts();
     updateSyncStatus();
   }
 
@@ -263,17 +347,23 @@ const Settings = (function () {
     var resultEl = document.getElementById('sync-test-result');
     if (errorEl) errorEl.textContent = '';
 
+    logActivity('ok', 'Test connection: clicked');
+
     var fields = gatherSyncFields();
+    logActivity('ok', 'Config read: collection="' + (fields.collectionName || '(empty)') +
+      '", project="' + (fields.config.projectId || '(empty)') + '"');
 
     // Validate before attempting a connection.
     var result = FirestoreConfig.validate(fields.config, fields.collectionName);
     if (!result.valid) {
       if (errorEl) errorEl.textContent = result.errors.join(' ');
+      logActivity('err', 'Validation failed: ' + result.errors.join(' '));
       return;
     }
 
     if (typeof SyncEngine === 'undefined' || !SyncEngine.testConnection) {
       if (errorEl) errorEl.textContent = 'Sync engine unavailable.';
+      logActivity('err', 'SyncEngine unavailable (script not loaded?)');
       return;
     }
 
@@ -284,6 +374,7 @@ const Settings = (function () {
       resultEl.textContent = 'Connecting to Firestore…';
       resultEl.removeAttribute('hidden');
     }
+    logActivity('ok', 'Connecting to Firestore (loading SDK)…');
 
     var res;
     try {
@@ -308,6 +399,47 @@ const Settings = (function () {
       resultEl.className = 'sync-test-result ' + (res.ok ? 'sync-test-ok' : 'sync-test-fail');
       resultEl.textContent = (res.ok ? '✅ ' : '❌ ') + res.message;
       resultEl.removeAttribute('hidden');
+    }
+    logActivity(res.ok ? 'ok' : 'err', 'Result: ' + res.message);
+  }
+
+  /**
+   * Handle the "Full sync from DB" button — an explicit authoritative sync:
+   * push dirty local changes, then pull everything from Firestore.
+   */
+  async function handleFullSync(e) {
+    if (e) e.preventDefault();
+
+    var fullBtn = document.getElementById('sync-fullsync-btn');
+    var errorEl = document.getElementById('sync-settings-error');
+    if (errorEl) errorEl.textContent = '';
+
+    if (!FirestoreConfig.isSyncEnabled() || !FirestoreConfig.hasConfig()) {
+      if (errorEl) errorEl.textContent = 'Enable cloud sync and save your Firebase settings first.';
+      logActivity('err', 'Full sync: sync not enabled / config missing');
+      return;
+    }
+    if (typeof SyncEngine === 'undefined' || !SyncEngine.fullSync) {
+      if (errorEl) errorEl.textContent = 'Sync engine unavailable.';
+      logActivity('err', 'Full sync: SyncEngine unavailable');
+      return;
+    }
+
+    var originalText = fullBtn ? fullBtn.textContent : '';
+    if (fullBtn) { fullBtn.disabled = true; fullBtn.textContent = 'Syncing…'; }
+    logActivity('ok', 'Full sync from DB: requested');
+
+    var ok = false;
+    try {
+      ok = await SyncEngine.fullSync();
+    } catch (err) {
+      logActivity('err', 'Full sync error: ' + ((err && err.message) ? err.message : 'unknown'));
+    }
+
+    if (fullBtn) { fullBtn.disabled = false; fullBtn.textContent = originalText || '⬇️ Full sync from DB'; }
+    updateSyncStatus();
+    if (!ok && errorEl && !errorEl.textContent) {
+      errorEl.textContent = 'Full sync did not complete. See the activity log.';
     }
   }
 
@@ -394,6 +526,7 @@ const Settings = (function () {
     getDefaultGuestFee, setDefaultGuestFee,
     applyTheme, updateAppNameDisplay,
     getAllSettings, restoreSettings,
-    initSyncSettings, updateSyncStatus
+    initSyncSettings, updateSyncStatus,
+    logActivity, renderLog, clearLog
   };
 })();

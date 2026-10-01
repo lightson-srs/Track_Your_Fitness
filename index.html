@@ -575,8 +575,19 @@
       <button class="btn btn-secondary" id="sync-test-btn" style="flex:1;">Test connection</button>
       <button class="btn btn-primary" id="sync-settings-save-btn" style="flex:1;">Save sync settings</button>
     </div>
+    <button class="btn btn-secondary" id="sync-fullsync-btn" style="width:100%;margin-top:8px;">⬇️ Full sync from DB</button>
+    <div class="loan-notes" style="margin-top:4px;">Pushes local changes, then pulls everything from the database. Page load/refresh does a quick incremental sync automatically.</div>
     <div id="sync-test-result" class="sync-test-result" hidden></div>
     <div class="success-msg" id="sync-settings-save-msg" hidden>Sync settings saved!</div>
+    <div id="sync-conflicts-wrap" class="sync-conflicts" hidden>
+      <div class="sync-conflicts-title">⚠️ Sync conflicts <button type="button" id="sync-conflicts-clear" class="log-clear-btn">dismiss all</button></div>
+      <div class="loan-notes" style="margin-bottom:6px;">These records were changed on another device, so your local change was not uploaded. Review each, re-open and re-save to keep your version, or run Full sync to take the other device's version.</div>
+      <div id="sync-conflicts-list"></div>
+    </div>
+    <div class="log-wrap">
+      <div class="log-title">Activity log <button type="button" id="sync-log-clear" class="log-clear-btn">clear</button></div>
+      <div id="sync-log-list"><div class="log-empty">No activity yet</div></div>
+    </div>
   </div>
   <div class="settings-section">
     <h3>Backup &amp; restore</h3>

@@ -122,11 +122,32 @@ const DB = (function () {
   // remote value). The sync engine toggles _suppressStamp around those writes.
   var _suppressStamp = false;
   function setSuppressStamp(on) { _suppressStamp = !!on; }
+
+  // Optimistic concurrency token:
+  //   _baseUpdatedAt = the server `updatedAt` this record was last synced from.
+  // On a LOCAL edit we bump `updatedAt`/`version` but PRESERVE _baseUpdatedAt as
+  // the baseline the edit was made from, so push/merge can detect whether the
+  // remote changed underneath us since then. A brand-new local record has no
+  // _baseUpdatedAt (it's a create, cannot conflict).
   function stampRecord(record) {
     if (_suppressStamp) return record;
     if (!record || typeof record !== 'object') return record;
+    // Capture the pre-edit value as the base the first time we edit a record
+    // that already had a server-synced updatedAt and no base recorded yet.
+    if (record._baseUpdatedAt === undefined && typeof record.updatedAt === 'number') {
+      record._baseUpdatedAt = record.updatedAt;
+    }
     record.updatedAt = Date.now();
     record.version = (typeof record.version === 'number' ? record.version : 0) + 1;
+    return record;
+  }
+
+  // Called by the sync engine after a record is written FROM the server (pull /
+  // full merge) or confirmed written TO the server (accepted push): the record
+  // is now in sync, so its base token equals its current server updatedAt.
+  function markSynced(record) {
+    if (!record || typeof record !== 'object') return record;
+    record._baseUpdatedAt = (typeof record.updatedAt === 'number') ? record.updatedAt : Date.now();
     return record;
   }
 
@@ -323,7 +344,7 @@ const DB = (function () {
   }
 
   return {
-    init, generateId, setSuppressStamp,
+    init, generateId, setSuppressStamp, markSynced,
     addMember, getMember, getAllMembers, updateMember, deleteMember,
     addContribution, getContribution, getAllContributions, updateContribution,
     deleteContribution, getContributionByMember,

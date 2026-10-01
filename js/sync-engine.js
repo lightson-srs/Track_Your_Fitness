@@ -72,6 +72,12 @@ const SyncEngine = (function () {
     } catch (e) {}
   }
 
+  // Safe bridge to the Settings activity log (no-op if Settings isn't loaded).
+  function slog(status, msg) {
+    try { if (typeof Settings !== 'undefined' && Settings.logActivity) Settings.logActivity(status, msg); }
+    catch (e) {}
+  }
+
   // --- Firebase SDK Loading ---
 
   function loadScript(src) {
@@ -121,6 +127,30 @@ const SyncEngine = (function () {
   }
 
   function getQueueSize() { return getQueue().length; }
+
+  // ─── Conflicts registry (optimistic concurrency: reject-and-flag) ───
+  // When a record was changed on another device since our local edit's base,
+  // we reject only that record and record it here (never block the batch).
+  var CONFLICTS_KEY = 'tyf_sync_conflicts';
+
+  function getConflicts() {
+    try { var raw = localStorage.getItem(CONFLICTS_KEY); return raw ? JSON.parse(raw) : []; }
+    catch (e) { return []; }
+  }
+  function _saveConflicts(arr) {
+    try { localStorage.setItem(CONFLICTS_KEY, JSON.stringify(arr.slice(0, 100))); } catch (e) {}
+  }
+  function flagConflict(storeName, docId, reason) {
+    var arr = getConflicts();
+    // One entry per store+doc (latest wins).
+    arr = arr.filter(function (c) { return !(c.store === storeName && c.docId === String(docId)); });
+    arr.unshift({ store: storeName, docId: String(docId), reason: reason || 'changed on another device', at: Date.now() });
+    _saveConflicts(arr);
+    slog('err', 'Conflict: ' + storeName + ' ' + docId + ' — ' + (reason || 'changed on another device') + ' (not synced)');
+    document.dispatchEvent(new CustomEvent('tyf-sync-conflict'));
+  }
+  function clearConflicts() { _saveConflicts([]); document.dispatchEvent(new CustomEvent('tyf-sync-conflict')); }
+  function getConflictCount() { return getConflicts().length; }
 
   // Changes are always identified by their stable record `id` (docId), never by
   // array position. Dedup keeps a single pending op per store+doc.
@@ -215,7 +245,27 @@ const SyncEngine = (function () {
         var dataDocRef = dataColRef.doc(entry.docId);
 
         await firestoreDb.runTransaction(async function (tx) {
+          // Read meta AND the current remote data doc for optimistic-concurrency.
           var metaSnap = await tx.get(metaRef);
+          var remoteSnap = await tx.get(dataDocRef);
+
+          // ─── Optimistic concurrency check (reject-and-flag) ───
+          // Only meaningful for updates to an existing remote doc. A delete, or
+          // a create (remote missing), cannot conflict here.
+          if (entry.operation !== 'delete' && remoteSnap.exists) {
+            var remoteData = remoteSnap.data() || {};
+            var base = (entry.data && typeof entry.data._baseUpdatedAt === 'number')
+              ? entry.data._baseUpdatedAt : undefined;
+            var remoteTs = (typeof remoteData.updatedAt === 'number') ? remoteData.updatedAt : undefined;
+            // If we have a base and the remote moved past it → someone else edited
+            // this record while we were offline. Reject ONLY this record.
+            if (base !== undefined && remoteTs !== undefined && remoteTs !== base) {
+              var conflictErr = new Error('conflict');
+              conflictErr._tyfConflict = true;
+              throw conflictErr;
+            }
+          }
+
           var meta = metaSnap.exists ? (metaSnap.data() || {}) : {};
           var generation = (typeof meta.generation === 'number') ? meta.generation : 1;
           var revision = (typeof meta.revision === 'number') ? meta.revision : 0;
@@ -225,6 +275,11 @@ const SyncEngine = (function () {
           if (entry.operation === 'delete') {
             tx.delete(dataDocRef);
           } else {
+            // Accepted: this record is now in sync, so its base token equals its
+            // own updatedAt. Persist that on the uploaded doc too.
+            if (entry.data && typeof entry.data.updatedAt === 'number') {
+              entry.data._baseUpdatedAt = entry.data.updatedAt;
+            }
             tx.set(dataDocRef, entry.data);
           }
 
@@ -242,8 +297,19 @@ const SyncEngine = (function () {
           // 3. Advance meta.
           tx.set(metaRef, { generation: generation, revision: nextRev }, { merge: true });
         });
+
+        // Accepted write — reflect the new base token in the local record so a
+        // later edit measures against the value we just uploaded.
+        if (entry.operation !== 'delete' && entry.data && entry.data.id) {
+          try { await _writeBackLocalBase(entry.storeName, entry.data); } catch (e) {}
+        }
       } catch (err) {
-        if (err && err.code === 'permission-denied') {
+        if (err && err._tyfConflict) {
+          // Reject ONLY this record: flag it, drop from the queue (do not retry
+          // forever), and continue pushing the rest.
+          flagConflict(entry.storeName, entry.docId, 'edited on another device since your change');
+          // entry intentionally NOT added to `remaining`.
+        } else if (err && err.code === 'permission-denied') {
           // Rules blocked write — drop silently so we don't loop forever.
         } else {
           remaining.push(entry);
@@ -253,6 +319,29 @@ const SyncEngine = (function () {
 
     saveQueue(remaining);
     if (remaining.length > 0) console.log('[SYNC] Push incomplete,', remaining.length, 'items remaining');
+  }
+
+  // After an accepted push, update the local record's _baseUpdatedAt so the next
+  // local edit is measured against the value we just uploaded (not an older base).
+  async function _writeBackLocalBase(storeName, data) {
+    var methods = STORE_METHOD_MAP[storeName];
+    if (!methods || !methods.get || !methods.update) return;
+    var _prevSuppress = _suppressNotify;
+    _suppressNotify = true;
+    DB.setSuppressStamp(true);
+    try {
+      var local = await DB[methods.get](data.id);
+      if (local && typeof data.updatedAt === 'number') {
+        // Only write back if the local record hasn't been edited again since.
+        if (local.updatedAt === data.updatedAt) {
+          local._baseUpdatedAt = data.updatedAt;
+          await DB[methods.update](local);
+        }
+      }
+    } catch (e) {} finally {
+      DB.setSuppressStamp(false);
+      _suppressNotify = _prevSuppress;
+    }
   }
 
   // ─── Read remote meta ───
@@ -296,6 +385,9 @@ const SyncEngine = (function () {
       }
       var remote = snap.data();
       if (!remote || !remote.id) remote = Object.assign({ id: docId }, remote || {});
+      // This record now reflects the server; set its base token so a later local
+      // edit is measured against this value for optimistic-concurrency checks.
+      DB.markSynced(remote);
       await DB[methods.update](remote);
     } catch (e) {
       // Re-throw so the caller does NOT advance the cursor past a failed apply.
@@ -401,27 +493,51 @@ const SyncEngine = (function () {
         var localMap = {};
         localRecords.forEach(function (r) { if (r.id) localMap[r.id] = r; });
 
-        // Delete local records absent from remote.
-        for (var localId in localMap) {
-          if (!remoteDocs[localId]) {
-            try { await DB[methods.delete](localId); } catch (e) {}
-          }
-        }
+        // NON-DESTRUCTIVE MERGE: never delete a local record just because it is
+        // absent from the remote. "Absent" is ambiguous — it can mean "created
+        // locally, not yet pushed" (common on first sync / empty remote), and
+        // deleting it would destroy brand-new data. Record deletions propagate
+        // ONLY through explicit change-stream delete envelopes in
+        // incrementalPull() → applyRemoteDoc(store, id, 'delete'). Full merge is
+        // upsert-only; any local-only record is kept and uploaded by the next push().
 
-        // Merge remote → local, newest updatedAt wins when both exist.
+        // Merge remote → local with OPTIMISTIC CONCURRENCY (reject-and-flag).
+        // For each record present on both sides we compare the local record's
+        // base token (the server value it was last synced from) against the
+        // current remote value to decide: accept remote / keep local / conflict.
         for (var remoteId in remoteDocs) {
           var remote = remoteDocs[remoteId];
           if (!remote || !remote.id) remote = Object.assign({ id: remoteId }, remote || {});
           var localRec = localMap[remoteId];
-          if (localRec) {
-            var rTs = (typeof remote.updatedAt === 'number') ? remote.updatedAt : 0;
-            var lTs = (typeof localRec.updatedAt === 'number') ? localRec.updatedAt : 0;
-            if (rTs < lTs) {
-              // Local is newer — keep local, it will be pushed on the next push().
-              continue;
-            }
+
+          if (!localRec) {
+            // Remote-only record → add it locally (now in sync).
+            DB.markSynced(remote);
+            try { await DB[methods.update](remote); } catch (e) {}
+            continue;
           }
-          try { await DB[methods.update](remote); } catch (e) {}
+
+          var rTs    = (typeof remote.updatedAt === 'number') ? remote.updatedAt : 0;
+          var lTs    = (typeof localRec.updatedAt === 'number') ? localRec.updatedAt : 0;
+          var lBase  = (typeof localRec._baseUpdatedAt === 'number') ? localRec._baseUpdatedAt : undefined;
+          var localDirty = (lBase === undefined) ? (lTs > 0 && rTs === 0) : (lTs !== lBase);
+
+          if (!localDirty) {
+            // Local has no un-pushed edit → accept the remote value.
+            if (rTs !== lTs) { DB.markSynced(remote); try { await DB[methods.update](remote); } catch (e) {} }
+            continue;
+          }
+
+          // Local IS dirty. Did the remote move past our base?
+          var remoteMatchesBase = (lBase !== undefined) && (rTs === lBase);
+          if (remoteMatchesBase) {
+            // Remote unchanged since our base → keep local; it uploads next push.
+            continue;
+          }
+
+          // Both the local record and the remote changed independently → CONFLICT.
+          // Reject (keep local untouched, do NOT overwrite) and flag this record.
+          flagConflict(storeName, remoteId, 'changed on another device and locally');
         }
       }
     } catch (e) {
@@ -444,7 +560,16 @@ const SyncEngine = (function () {
 
     if (!remoteMeta) {
       // No version info in the DB → regular merge, then seed meta on next push.
+      slog('ok', 'No version info in DB → full merge');
       await fullMerge();
+      return;
+    }
+
+    var local = getLocalCursor();
+    // Cache-first: if our cursor already matches the remote head, there is
+    // nothing to download beyond the /sync/meta read we just did.
+    if (local.generation === remoteMeta.generation && local.revision === remoteMeta.revision) {
+      slog('ok', 'Up to date (rev ' + remoteMeta.revision + ') — cache-first, no download');
       return;
     }
 
@@ -457,9 +582,12 @@ const SyncEngine = (function () {
       ok = false;
     }
 
-    if (!ok) {
+    if (ok) {
+      slog('ok', 'Incremental sync → rev ' + remoteMeta.revision);
+    } else {
       // Local version not in the DB's history (or replay failed) → regular merge,
       // then adopt the remote cursor as our new baseline.
+      slog('ok', 'Cursor not in history → full merge, adopt rev ' + remoteMeta.revision);
       await fullMerge();
       setLocalCursor(remoteMeta.generation, remoteMeta.revision);
     }
@@ -470,8 +598,9 @@ const SyncEngine = (function () {
   async function sync() {
     if (status !== 'connected') {
       var connected = await connect();
-      if (!connected) return;
+      if (!connected) { slog('err', 'Quick sync: not connected'); return; }
     }
+    slog('ok', 'Quick sync: push + Sync V2 check');
     await push();
     await pull();
     // After a push that created new revisions, align our cursor to the head so
@@ -480,6 +609,36 @@ const SyncEngine = (function () {
     if (afterMeta) setLocalCursor(afterMeta.generation, afterMeta.revision);
     // Refresh UI once after sync
     document.dispatchEvent(new CustomEvent('tyf-sync-update'));
+  }
+
+  // --- Full sync: explicit, authoritative reconciliation from the DB ---
+  // Triggered by the Settings "Full sync from DB" button. Unlike the lightweight
+  // sync() (which is cache-first and incremental via the version cursor), this
+  // always pushes dirty local changes and then performs a full merge against
+  // every collection regardless of the cursor, then adopts the remote head.
+  // Still non-destructive: full merge never deletes local-only records.
+  async function fullSync() {
+    if (status !== 'connected') {
+      var connected = await connect();
+      if (!connected) { slog('err', 'Full sync: not connected'); return false; }
+    }
+    slog('ok', 'Full sync from DB: starting (push + full merge)…');
+    try {
+      await push();
+      await fullMerge();
+      var afterMeta = await readRemoteMeta();
+      if (afterMeta) {
+        setLocalCursor(afterMeta.generation, afterMeta.revision);
+        slog('ok', 'Full sync complete → rev ' + afterMeta.revision);
+      } else {
+        slog('ok', 'Full sync complete (no version meta yet)');
+      }
+      document.dispatchEvent(new CustomEvent('tyf-sync-update'));
+      return true;
+    } catch (e) {
+      slog('err', 'Full sync failed: ' + ((e && e.message) ? e.message : 'unknown'));
+      return false;
+    }
   }
 
   // --- Connect to Firestore (no listeners) ---
@@ -534,10 +693,13 @@ const SyncEngine = (function () {
 
     var testApp = null;
     try {
+      slog('ok', 'Loading Firebase SDK from gstatic.com…');
       await loadFirebaseSDK();
       if (!window.firebase) {
+        slog('err', 'Firebase SDK not available after load');
         return { ok: false, message: 'Firebase SDK could not be loaded. Check your internet connection.' };
       }
+      slog('ok', 'Firebase SDK loaded; initializing app…');
 
       var firebaseConfig = {};
       if (configObj.apiKey) firebaseConfig.apiKey = configObj.apiKey;
@@ -554,8 +716,10 @@ const SyncEngine = (function () {
       var testDb = firebase.firestore(testApp);
       // Lightweight read: limit(1) on the members collection under this prefix.
       var colName = (collectionName || FirestoreConfig.getCollectionName() || 'test');
+      slog('ok', 'Reading ' + colName + '_members (limit 1)…');
       await testDb.collection(colName + '_members').limit(1).get();
 
+      slog('ok', 'Read succeeded');
       return { ok: true, message: 'Connected successfully to project "' + (configObj.projectId || '') + '".' };
     } catch (e) {
       var msg = (e && e.message) ? e.message : 'Unknown error';
@@ -605,7 +769,11 @@ const SyncEngine = (function () {
     notifyChange: notifyChange,
     getStatus: getStatus,
     flushQueue: flushQueue,
+    fullSync: fullSync,
     getQueueSize: getQueueSize,
+    getConflicts: getConflicts,
+    getConflictCount: getConflictCount,
+    clearConflicts: clearConflicts,
     testConnection: testConnection
   };
 })();

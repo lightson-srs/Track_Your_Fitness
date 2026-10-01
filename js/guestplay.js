@@ -19,6 +19,8 @@ const GuestPlay = (function () {
 
     if (dateInput)   { if (!dateInput.value) { dateInput.value = getTodayISO(); syncDatePicker('guest-date'); } dateInput.addEventListener('change', renderGuestList); }
     if (searchInput) searchInput.addEventListener('input', renderGuestList);
+    var outstandingFilter = document.getElementById('guest-filter-outstanding');
+    if (outstandingFilter) outstandingFilter.addEventListener('change', renderGuestList);
     if (confirmBtn)  confirmBtn.addEventListener('click', handleConfirmPayment);
     if (cancelBtn)   cancelBtn.addEventListener('click', hidePaymentModal);
 
@@ -33,6 +35,8 @@ const GuestPlay = (function () {
     var searchInput = document.getElementById('guest-search');
     var date        = dateInput   ? dateInput.value             : getTodayISO();
     var searchTerm  = searchInput ? searchInput.value.trim().toLowerCase() : '';
+    var outstandingCb   = document.getElementById('guest-filter-outstanding');
+    var showOutstanding = outstandingCb ? outstandingCb.checked : true;
 
     container.innerHTML = '<p class="empty-message">Loading…</p>';
 
@@ -74,6 +78,23 @@ const GuestPlay = (function () {
           enrolledOnDate[s.memberId].push(s);
         }
       });
+
+      // Helper: outstanding (pending) amount for a member up to the selected date.
+      function pendingFor(memberId) {
+        var sess = sessionsByMember[memberId] || [];
+        var fees = sess.reduce(function (sum, s) { return sum + (s.fee || 0); }, 0);
+        var paid = paidByMember[memberId] || 0;
+        return Math.max(0, fees - paid);
+      }
+
+      // "Show outstanding" (default on): list only members who currently owe.
+      if (showOutstanding) {
+        members = members.filter(function (m) { return pendingFor(m.id) > 0; });
+        if (members.length === 0) {
+          container.innerHTML = '<p class="empty-message">No members with outstanding dues.</p>';
+          return;
+        }
+      }
 
       var defaultFee = Settings.getDefaultGuestFee();
       var html = '';

@@ -248,6 +248,9 @@ const Settings = (function () {
       }
       // Keep the conflict panel live as conflicts are flagged during sync.
       document.addEventListener('tyf-sync-conflict', renderConflicts);
+      // Refresh the sync status whenever a sync/connect completes, so the label
+      // reflects the real connected/disconnected outcome (not a stale pre-connect read).
+      document.addEventListener('tyf-sync-update', updateSyncStatus);
       _syncSettingsBound = true;
     }
 
@@ -289,7 +292,7 @@ const Settings = (function () {
    * Handle the sync enable/disable toggle.
    * Enables or disables sync without deleting the stored config.
    */
-  function handleSyncToggle() {
+  async function handleSyncToggle() {
     var syncToggle = document.getElementById('sync-toggle');
     if (!syncToggle) return;
 
@@ -297,9 +300,13 @@ const Settings = (function () {
     FirestoreConfig.setSyncEnabled(enabled);
 
     if (enabled) {
-      // Reinitialize sync if SyncEngine is available
+      // Show a transient "Connecting…" while the async init/connect runs, then
+      // refresh the status with the REAL outcome. Reading status synchronously
+      // right after init() is wrong — init() loads the SDK and connects async,
+      // so the status would be read before it finishes (shows "Disconnected").
+      _setSyncStatusText('Connecting…');
       if (typeof SyncEngine !== 'undefined' && SyncEngine.init) {
-        try { SyncEngine.init(); } catch (e) {}
+        try { await SyncEngine.init(); } catch (e) {}
       }
     } else {
       // Disconnect sync
@@ -494,6 +501,11 @@ const Settings = (function () {
    * Update the sync status display text.
    * Checks SyncEngine.getStatus() if available.
    */
+  function _setSyncStatusText(text) {
+    var statusEl = document.getElementById('sync-status-text');
+    if (statusEl) statusEl.textContent = text;
+  }
+
   function updateSyncStatus() {
     var statusEl = document.getElementById('sync-status-text');
     if (!statusEl) return;

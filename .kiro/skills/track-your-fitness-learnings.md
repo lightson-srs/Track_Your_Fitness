@@ -53,6 +53,16 @@ description: Key technical learnings and patterns from building the Track Your F
 - If behind within `CHANGE_WINDOW` (500) → replay only missing change envelopes in order, applying each affected doc **by id**; advance cursor only after each success.
 - Fall back to **full merge** when: no `/sync/meta`, generation mismatch, local ahead, gap > window, missing revision, or any read/apply error.
 
+### Sync triggers & controls (decided UX)
+- **Page load / refresh → quick Sync V2 check** automatically (`app.js init → SyncEngine.init → sync → cache-first/incremental pull`). This is the lightweight path; it must NOT do a full merge unless the cursor forces fallback.
+- **Header 🔄 button** (banner) → quick sync (`flushQueue → sync`). Keep it; it is NOT the full sync.
+- **"Full sync from DB" button → Settings tab ONLY** (`#sync-fullsync-btn`, Cloud Sync section). It is the explicit authoritative pull (`push` + unconditional `fullMerge` + adopt head). Never put full sync in the header/banner.
+- **Full sync does NOT bump `generation`** (option B). Bumping generation would force every other device into a full merge on their next load, defeating cache-first incremental sync. Generation bumps are reserved for a true baseline reset, never for a routine manual sync.
+
+### Service-worker cache lag (why a new button "isn't there")
+- After deploying new HTML/JS, users keep seeing the OLD UI because the cache-first SW serves the cached `index.html`/JS. A missing just-added button is almost always this, not a code bug.
+- Always **bump `CACHE_NAME`** on deploy. Even so, SW updates typically need a **second reload** to activate (first load installs the new SW in the background). Verify the deployed file over `raw.githubusercontent.com` to confirm the code shipped before debugging the UI.
+
 ### CRITICAL: pulls must be NON-DESTRUCTIVE (data-loss lesson)
 - **Never delete a local record just because it is absent from the remote.** "Absent" is ambiguous — it usually means "created locally, not yet pushed" (first sync / empty remote). The original `fullMerge` deleted local-only records → a member added then refreshed got WIPED when the remote was empty.
 - Deletions propagate **only** via explicit `delete` change envelopes in `incrementalPull → applyRemoteDoc(store, id, 'delete')`. Full merge is **upsert-only**.

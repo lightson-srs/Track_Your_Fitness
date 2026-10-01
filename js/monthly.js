@@ -149,6 +149,17 @@ const Monthly = (function () {
         if (!prev || (r.date || '') >= (prev.date || '')) latestFeeByMember[r.memberId] = r;
       });
 
+      // Members who made a MONTHLY payment on the selected ref date (partial or
+      // full). Used so the unchecked view also shows "paid today" members, not
+      // just outstanding ones. memberId → total paid on refDate.
+      var allPayments = await DB.getAllPayments();
+      var paidOnDate = {};
+      allPayments.forEach(function (p) {
+        if (p.type === 'monthly' && p.date === refDate) {
+          paidOnDate[p.memberId] = (paidOnDate[p.memberId] || 0) + (p.amount || 0);
+        }
+      });
+
       // Active members with EITHER a contribution OR any fee record.
       members = members.filter(function (m) {
         return m.status !== 'inactive' && (contribMap[m.id] || hasFeeRecord[m.id]);
@@ -161,10 +172,20 @@ const Monthly = (function () {
         var m = members[i];
         var c = contribMap[m.id];
         var bal = await calcMemberBalance(m, c, refDate);
-        items.push({ member: m, contrib: c, bal: bal });
+        var paidTodayAmt = paidOnDate[m.id] || 0;
+        items.push({ member: m, contrib: c, bal: bal, paidTodayAmt: paidTodayAmt });
       }
 
-      if (showUnpaid) items = items.filter(function (it) { return it.bal.balance > 0; });
+      // Filtering:
+      //  • "Unpaid only" CHECKED  → only members who still owe (balance > 0).
+      //  • UNCHECKED              → outstanding members PLUS anyone who made a
+      //    monthly payment on the selected date (partial or full). Members who
+      //    are fully paid with no payment on this date are not shown.
+      if (showUnpaid) {
+        items = items.filter(function (it) { return it.bal.balance > 0; });
+      } else {
+        items = items.filter(function (it) { return it.bal.balance > 0 || it.paidTodayAmt > 0; });
+      }
 
       if (items.length === 0) { container.innerHTML = '<p class="empty-message">No members to show.</p>'; return; }
 
@@ -189,6 +210,10 @@ const Monthly = (function () {
         html += '<span class="loan-type-badge badge-monthly">₹' + monthlyFee.toFixed(0) + '/mo</span> ';
         if (!c) html += '<span class="loan-type-badge badge-guest" style="font-size:0.68rem;">not enrolled</span> ';
         html += balLabel;
+        // Show what was collected on the selected date (partial or full).
+        if (it.paidTodayAmt > 0) {
+          html += ' <span class="amount-paid">₹' + it.paidTodayAmt.toFixed(2) + ' paid on ' + esc(fmtDate(refDate)) + '</span>';
+        }
         if (bal.currentPeriod) html += ' <span class="loan-notes">Period: ' + esc(bal.currentPeriod.label) + '</span>';
         html += '</div></div>';
         html += '<div class="client-actions">';

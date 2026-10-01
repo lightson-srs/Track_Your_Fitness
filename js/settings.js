@@ -287,7 +287,18 @@ const Settings = (function () {
 
     var res;
     try {
-      res = await SyncEngine.testConnection(fields.config, fields.collectionName);
+      // Guard against a hung connection (e.g. SDK CDN blocked / offline) so the
+      // UI never gets stuck on "Testing…" with no result.
+      var timeoutMs = 20000;
+      var timeoutPromise = new Promise(function (_, reject) {
+        setTimeout(function () {
+          reject(new Error('Timed out after ' + (timeoutMs / 1000) + 's. Check your internet connection and Firebase config.'));
+        }, timeoutMs);
+      });
+      res = await Promise.race([
+        SyncEngine.testConnection(fields.config, fields.collectionName),
+        timeoutPromise
+      ]);
     } catch (err) {
       res = { ok: false, message: (err && err.message) ? err.message : 'Connection test failed.' };
     }

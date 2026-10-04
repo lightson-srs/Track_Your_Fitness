@@ -196,6 +196,9 @@ const Backup = (function () {
         Settings.applyTheme();
         Settings.updateAppNameDisplay();
 
+        Settings.setLastBackup(getTodayISO());
+        displayLastBackupInfo();
+
         alert('Restore complete!\n\n' +
           '  Members:        ' + members.length        + '\n' +
           '  Contributions:  ' + contributions.length  + '\n' +
@@ -204,13 +207,16 @@ const Backup = (function () {
           '  Guest sessions: ' + guestSessions.length  + '\n' +
           '  Fee records:    ' + monthlyFeeRecs.length + '\n' +
           '  Attendance:     ' + attendance.length     + '\n' +
-          '  Firestore config: ' + (firestoreConfig ? 'Yes' : 'No'));
+          '  Firestore config: ' + (firestoreConfig ? 'Yes' : 'No') + '\n\n' +
+          'The app will now reload to apply restored settings & license.');
 
-        Settings.setLastBackup(getTodayISO());
-        displayLastBackupInfo();
-
-        // Refresh current screen
-        if (typeof App !== 'undefined') App.navigateToScreen('members-screen');
+        // Reload so the restored localStorage (app name, UPI, default guest fee,
+        // license key, theme, etc.) is reflected everywhere: the index.html
+        // license IIFE recomputes window._isLicensed, and License.init /
+        // Settings.init repopulate the banner and all Settings form fields.
+        // A plain screen refresh is NOT enough — it leaves the license state and
+        // Settings form showing pre-restore values until the next load.
+        window.location.reload();
 
       } catch (ex) {
         alert('Restore failed: ' + ex.message);

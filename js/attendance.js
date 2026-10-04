@@ -367,7 +367,11 @@ const Attendance = (function () {
         return;
       }
 
-      var today = getTodayISO();
+      // Mark attendance for the DATE SELECTED in the attendance screen's date
+      // picker (consistent with the manual Save path), falling back to today
+      // only if the picker is empty.
+      var dateInput = document.getElementById('att-date');
+      var attDate = (dateInput && dateInput.value) ? dateInput.value : getTodayISO();
 
       // Scanning a deactivated member reactivates them automatically.
       var reactivated = false;
@@ -377,14 +381,14 @@ const Attendance = (function () {
         catch (e) { console.error('Could not reactivate member on scan', member.id, e); }
       }
 
-      await DB.saveAttendance(member.id, today, 'present');
+      await DB.saveAttendance(member.id, attDate, 'present');
 
       var dueText = '';
       if (typeof Monthly !== 'undefined' && typeof Monthly.calcMemberBalance === 'function') {
         try {
           var contrib = await DB.getContributionByMember(member.id);
           if (contrib) {
-            var bal = await Monthly.calcMemberBalance(member, contrib, today);
+            var bal = await Monthly.calcMemberBalance(member, contrib, attDate);
             dueText = bal.balance > 0
               ? 'Pending due: ₹' + bal.balance.toFixed(2)
               : 'No pending due ✓';
@@ -393,7 +397,7 @@ const Attendance = (function () {
       }
 
       var typeLabel = (member.memberType && member.memberType !== 'Regular') ? ' (' + member.memberType + ')' : '';
-      var markedMsg = reactivated ? ' — reactivated & marked present!' : ' — attendance marked!';
+      var markedMsg = reactivated ? ' — reactivated & marked present!' : ' — marked present on ' + fmtDate(attDate) + '!';
       showScanToast('success', member.name + typeLabel + markedMsg, dueText);
 
       renderAttendance();

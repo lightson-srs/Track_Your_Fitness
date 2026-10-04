@@ -247,12 +247,16 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 /* ── Print ───────────────────────────────────────────── */
 @media print {
   .nav-bar, .app-header, .filter-bar, .section-header .btn, .btn-icon, .license-banner, #more-menu, #more-menu-backdrop, .report-tabs, .filter-row { display: none !important; }
-  html, body { height: auto !important; overflow: visible !important; max-width: none !important; }
+  /* Flatten the entire scroll-container chain so multi-page reports are NOT
+     clipped to the first page. The parts most often missing are max-height:none
+     and display:block — a lingering flex context or implicit max-height makes
+     Save-as-PDF stop after page 1. */
+  html, body { height: auto !important; max-height: none !important; overflow: visible !important; max-width: none !important; }
   body { display: block !important; box-shadow: none !important; background: #fff; color: #000; }
-  .screen { padding: 0; overflow: visible !important; height: auto !important; flex: none !important; }
-  #reports-screen { overflow: visible !important; height: auto !important; }
-  #reports-screen .report-tab-panel { overflow: visible !important; height: auto !important; flex: none !important; }
-  #monthly-list, #guest-list, #member-list, #contrib-list, #expense-list, #history-list, #att-member-list { overflow: visible !important; height: auto !important; }
+  .screen { padding: 0 !important; overflow: visible !important; height: auto !important; max-height: none !important; min-height: 0 !important; display: block !important; flex: none !important; }
+  #reports-screen { overflow: visible !important; height: auto !important; max-height: none !important; display: block !important; flex: none !important; }
+  #reports-screen .report-tab-panel { overflow: visible !important; height: auto !important; max-height: none !important; min-height: 0 !important; display: block !important; flex: none !important; }
+  #monthly-list, #guest-list, #member-list, #contrib-list, #expense-list, #history-list, #att-member-list { overflow: visible !important; height: auto !important; max-height: none !important; display: block !important; }
   .report-table { page-break-inside: auto; width: 100%; }
   .report-table tr { page-break-inside: avoid; }
   .client-card { page-break-inside: avoid; }
@@ -433,7 +437,9 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 .id-card-actions { margin-top:16px; display:flex; gap:8px; }
 
 @media print {
-  body > *:not(.id-card-overlay) { display:none !important; }
+  /* Only blank the rest of the page when an ID card is actually open. Without
+     this guard, this rule hid #reports-screen on EVERY print → blank report PDFs. */
+  body:has(.id-card-overlay:not([hidden])) > *:not(.id-card-overlay) { display:none !important; }
   .id-card-overlay:not([hidden]) { position:static; background:none; padding:0; display:flex !important; }
   .id-card-actions { display:none !important; }
   .id-card { box-shadow:none; border:1px solid #ccc; }

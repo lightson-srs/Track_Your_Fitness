@@ -220,7 +220,7 @@ const PaymentHistory = (function () {
 
           } else { // guest_session
             badgeClass = 'badge-guest';
-            badgeLabel = 'Guest session';
+            badgeLabel = 'Guest';
             amountHtml = '<span class="amount-due">₹' + (r.fee || 0).toFixed(2) + ' fee</span>';
           }
 
@@ -317,7 +317,7 @@ const PaymentHistory = (function () {
       if (amountWrap) amountWrap.setAttribute('hidden', '');
       if (feeWrap)    feeWrap.removeAttribute('hidden');
     } else {
-      if (titleEl)    titleEl.textContent   = 'Edit guest session';
+      if (titleEl)    titleEl.textContent   = 'Edit guest entry';
       if (dateInput)  { dateInput.value       = record.date   || ''; syncDatePicker('history-edit-date'); }
       if (feeInput)   feeInput.value        = record.fee    || '';
       if (notesInput) notesInput.value      = record.notes  || '';
@@ -380,7 +380,7 @@ const PaymentHistory = (function () {
 
   // ─── Delete ──────────────────────────────────────────
   async function deleteRecord(type, id) {
-    var label = type === 'payment' ? 'payment record' : 'guest session record';
+    var label = type === 'payment' ? 'payment record' : 'guest record';
     if (!confirm('Delete this ' + label + '?')) return;
     try {
       if (type === 'payment') {

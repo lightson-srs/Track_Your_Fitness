@@ -35,12 +35,8 @@ const Reports = (function () {
       var el = document.getElementById(id);
       if (el) el.addEventListener('change', renderActiveReport);
     });
-    // Attendance report filter inputs
-    var attOperator = document.getElementById('report-att-operator');
-    var attDays = document.getElementById('report-att-days');
-    if (attOperator) attOperator.addEventListener('change', renderActiveReport);
-    if (attDays) attDays.addEventListener('input', renderActiveReport);
-    ['report-search','report-search-mw','report-search-os','report-search-att'].forEach(function (id) {
+    ['report-search','report-search-mw','report-search-os','report-search-att',
+     'report-notes-mw','report-notes-os','report-notes-att'].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.addEventListener('input', renderActiveReport);
     });
@@ -130,7 +126,7 @@ const Reports = (function () {
 
       var grand = payments.reduce(function (s, p) { return s + (p.amount || 0); }, 0);
       var html  = '<div class="history-summary">Grand total: <strong>₹' + grand.toFixed(2) + '</strong></div>';
-      html += '<table class="report-table"><thead><tr><th>Date</th><th>Monthly</th><th>Sessions</th><th>Total</th></tr></thead><tbody>';
+      html += '<table class="report-table"><thead><tr><th>Date</th><th>Monthly</th><th>Guest</th><th>Total</th></tr></thead><tbody>';
       dates.forEach(function (d) {
         var row = byDate[d];
         html += '<tr><td>' + fmtDate(d) + '</td><td>₹' + (row.monthly||0).toFixed(2) + '</td><td>₹' + (row.guest_play||0).toFixed(2) + '</td><td><strong>₹' + row.total.toFixed(2) + '</strong></td></tr>';
@@ -146,6 +142,7 @@ const Reports = (function () {
     if (!container) return;
     var { start, end } = getDateRange('report-start-mw', 'report-end-mw');
     var searchTerm = getSearch('report-search-mw');
+    var notesTerm  = getSearch('report-notes-mw');
     container.innerHTML = '<p class="empty-message">Loading…</p>';
 
     try {
@@ -176,6 +173,7 @@ const Reports = (function () {
       if (selectedType && selectedType !== 'all') {
         members = members.filter(function (m) { return (m.memberType || 'Regular') === selectedType; });
       }
+      if (notesTerm) members = members.filter(function (m) { return (m.notes || '').toLowerCase().indexOf(notesTerm) !== -1; });
 
       var byMember = {};
       payments.forEach(function (p) {
@@ -198,15 +196,16 @@ const Reports = (function () {
 
       var typeLabel = (selectedType && selectedType !== 'all') ? ' · ' + esc(selectedType) : '';
       var html  = '<div class="history-summary">Grand total' + typeLabel + ': <strong>₹' + totAll.toFixed(2) + '</strong></div>';
-      html += '<table class="report-table"><thead><tr><th>Member</th><th>Monthly</th><th>Sessions</th><th>Total</th></tr></thead><tbody>';
+      html += '<table class="report-table"><thead><tr><th>Member</th><th>Type</th><th>Monthly</th><th>Guest</th><th>Total</th></tr></thead><tbody>';
       members.forEach(function (m) {
         var row = byMember[m.id] || { monthly: 0, guest_play: 0, total: 0 };
-        html += '<tr><td>' + esc(m.name) + '</td><td>₹' + row.monthly.toFixed(2) + '</td><td>₹' + row.guest_play.toFixed(2) + '</td><td><strong>₹' + row.total.toFixed(2) + '</strong></td></tr>';
+        html += '<tr><td>' + esc(m.name) + '</td><td>' + esc(m.memberType || 'Regular') + '</td><td>₹' + row.monthly.toFixed(2) + '</td><td>₹' + row.guest_play.toFixed(2) + '</td><td><strong>₹' + row.total.toFixed(2) + '</strong></td></tr>';
       });
       html += '</tbody>';
       // Consolidated column totals.
       html += '<tfoot><tr class="report-total-row">' +
         '<td><strong>Total</strong></td>' +
+        '<td></td>' +
         '<td><strong>₹' + totMonthly.toFixed(2) + '</strong></td>' +
         '<td><strong>₹' + totGuest.toFixed(2) + '</strong></td>' +
         '<td><strong>₹' + totAll.toFixed(2) + '</strong></td>' +
@@ -221,6 +220,7 @@ const Reports = (function () {
     var container = document.getElementById('report-output-outstanding');
     if (!container) return;
     var searchTerm  = getSearch('report-search-os');
+    var notesTerm   = getSearch('report-notes-os');
     var refDateEl   = document.getElementById('report-outstanding-date');
     var refDate     = refDateEl && refDateEl.value ? refDateEl.value : new Date().toISOString().split('T')[0];
     container.innerHTML = '<p class="empty-message">Loading…</p>';
@@ -240,10 +240,11 @@ const Reports = (function () {
 
       var enrolled = members.filter(function (m) { return m.status !== 'inactive' && (contribMap[m.id] || hasFeeRecord[m.id]); });
       if (searchTerm) enrolled = enrolled.filter(function (m) { return m.name.toLowerCase().indexOf(searchTerm) !== -1; });
+      if (notesTerm) enrolled = enrolled.filter(function (m) { return (m.notes || '').toLowerCase().indexOf(notesTerm) !== -1; });
       enrolled.sort(function (a, b) { return a.name.localeCompare(b.name); });
 
       var html = '<div class="history-summary" style="margin-bottom:4px;">Outstanding as of <strong>' + refDate + '</strong></div>';
-      html += '<table class="report-table"><thead><tr><th>Member</th><th>Paid</th><th>Balance</th></tr></thead><tbody>';
+      html += '<table class="report-table"><thead><tr><th>Member</th><th>Type</th><th>Paid</th><th>Balance</th></tr></thead><tbody>';
       var totalOutstanding = 0;
 
       for (var i = 0; i < enrolled.length; i++) {
@@ -255,7 +256,7 @@ const Reports = (function () {
         var balText  = bal.balance > 0
           ? '₹' + bal.balance.toFixed(2)
           : bal.balance < 0 ? '₹' + Math.abs(bal.balance).toFixed(2) + ' adv' : '✓ Clear';
-        html += '<tr><td>' + esc(m.name) + '</td><td>₹' + bal.totalPaid.toFixed(2) + '</td><td class="' + balClass + '">' + balText + '</td></tr>';
+        html += '<tr><td>' + esc(m.name) + '</td><td>' + esc(m.memberType || 'Regular') + '</td><td>₹' + bal.totalPaid.toFixed(2) + '</td><td class="' + balClass + '">' + balText + '</td></tr>';
       }
       html += '</tbody></table>';
       html += '<div class="history-summary">Total outstanding: <strong class="amount-due">₹' + totalOutstanding.toFixed(2) + '</strong></div>';
@@ -344,7 +345,7 @@ const Reports = (function () {
       html += '<div class="report-section-title">Collection breakdown</div>';
       html += '<table class="report-table"><thead><tr><th>Type</th><th>Amount</th></tr></thead><tbody>';
       html += '<tr><td>Monthly contributions</td><td>₹' + totalMonthly.toFixed(2) + '</td></tr>';
-      html += '<tr><td>session fees</td><td>₹' + totalGuest.toFixed(2) + '</td></tr>';
+      html += '<tr><td>Guest fees</td><td>₹' + totalGuest.toFixed(2) + '</td></tr>';
       html += '<tr><td><strong>Total</strong></td><td><strong>₹' + totalCollection.toFixed(2) + '</strong></td></tr>';
       html += '</tbody></table>';
 
@@ -388,10 +389,7 @@ const Reports = (function () {
     if (!container) return;
     var { start, end } = getDateRange('report-start-att', 'report-end-att');
     var searchTerm = getSearch('report-search-att');
-    var operatorEl = document.getElementById('report-att-operator');
-    var daysEl = document.getElementById('report-att-days');
-    var operator = operatorEl ? operatorEl.value : 'all';
-    var daysFilter = daysEl ? parseInt(daysEl.value, 10) : NaN;
+    var notesTerm  = getSearch('report-notes-att');
     container.innerHTML = '<p class="empty-message">Loading…</p>';
 
     try {
@@ -427,14 +425,11 @@ const Reports = (function () {
         });
       }
 
-      // Filter by days operator
-      if (operator !== 'all' && !isNaN(daysFilter)) {
+      // Filter by member notes
+      if (notesTerm) {
         memberIds = memberIds.filter(function (id) {
-          var count = countMap[id] || 0;
-          if (operator === 'gte') return count >= daysFilter;
-          if (operator === 'lte') return count <= daysFilter;
-          if (operator === 'eq') return count === daysFilter;
-          return true;
+          var m = memberMap[id];
+          return m && (m.notes || '').toLowerCase().indexOf(notesTerm) !== -1;
         });
       }
 

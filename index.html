@@ -87,10 +87,10 @@
   <div id="monthly-list"></div>
 </main>
 
-<!-- ══ Sessions ══════════════════════════════════════ -->
+<!-- ══ Guest ══════════════════════════════════════════ -->
 <main id="guest-screen" class="screen" hidden>
   <div class="section-header">
-    <span class="screen-title">Sessions</span>
+    <span class="screen-title">Guest</span>
   </div>
   <div class="filter-bar">
     <div class="date-picker-wrap"><input type="date" id="guest-date" class="date-picker-hidden"><div class="date-picker-display" data-for="guest-date">Select date</div></div>
@@ -216,7 +216,7 @@
         <input type="number" id="enroll-monthly-fee" min="1" step="0.01" inputmode="decimal">
       </div>
       <div class="form-group">
-        <label for="enroll-guest-fee">session fee (₹)</label>
+        <label for="enroll-guest-fee">Guest fee (₹)</label>
         <input type="number" id="enroll-guest-fee" min="0" step="0.01" inputmode="decimal" placeholder="Leave blank for default">
       </div>
     </div>
@@ -349,7 +349,7 @@
       <option value="all">All records</option>
       <option value="monthly_fee">Monthly fee records</option>
       <option value="monthly_payment">Monthly payments</option>
-      <option value="guest_session">Guest session records</option>
+      <option value="guest_session">Guest records</option>
       <option value="guest_payment">Guest payments</option>
     </select>
   </div>
@@ -393,6 +393,7 @@
         <option value="all">All types</option>
       </select>
     </div>
+    <input type="text" id="report-notes-mw" placeholder="Filter by member notes…" class="search-input">
     <div id="report-output-memberwise"></div>
   </div>
 
@@ -402,6 +403,7 @@
       <span style="font-size:0.8rem;color:var(--text2);align-self:center;white-space:nowrap;">As of date</span>
     </div>
     <input type="text" id="report-search-os" placeholder="Filter by member…" class="search-input">
+    <input type="text" id="report-notes-os" placeholder="Filter by member notes…" class="search-input">
     <div id="report-output-outstanding"></div>
   </div>
 
@@ -418,16 +420,8 @@
       <div class="date-picker-wrap"><input type="date" id="report-start-att" class="date-picker-hidden"><div class="date-picker-display" data-for="report-start-att">Start date</div></div>
       <div class="date-picker-wrap"><input type="date" id="report-end-att" class="date-picker-hidden"><div class="date-picker-display" data-for="report-end-att">End date</div></div>
     </div>
-    <div class="filter-bar">
-      <input type="text" id="report-search-att" placeholder="Filter by member or type…" style="flex:2;">
-      <select id="report-att-operator" style="flex:1;padding:7px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.9rem;">
-        <option value="all">All</option>
-        <option value="gte">Days ≥</option>
-        <option value="lte">Days ≤</option>
-        <option value="eq">Days =</option>
-      </select>
-      <input type="number" id="report-att-days" min="0" placeholder="0" style="width:60px;padding:7px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.9rem;">
-    </div>
+    <input type="text" id="report-search-att" placeholder="Filter by member or type…" class="search-input">
+    <input type="text" id="report-notes-att" placeholder="Filter by member notes…" class="search-input">
     <div id="report-output-attendance"></div>
   </div>
 </main>
@@ -442,11 +436,11 @@
       <input type="text" id="settings-app-name" maxlength="50">
     </div>
     <div class="form-group">
-      <label for="settings-upi-id">UPI ID (for QR codes) *</label>
-      <input type="text" id="settings-upi-id" maxlength="45" placeholder="yourname@upi">
+      <label for="settings-upi-id">UPI ID (for QR codes)</label>
+      <input type="text" id="settings-upi-id" maxlength="45" placeholder="yourname@upi (optional)">
     </div>
     <div class="form-group">
-      <label for="settings-default-guest-fee">Default session fee (₹)</label>
+      <label for="settings-default-guest-fee">Default guest fee (₹)</label>
       <input type="number" id="settings-default-guest-fee" min="1" step="0.01" inputmode="decimal" placeholder="50">
       <div class="loan-notes">Applied when no member-specific guest fee is set</div>
     </div>
@@ -470,7 +464,7 @@
       <label class="toggle-switch"><input type="checkbox" id="wa-toggle-monthly"><span class="toggle-slider"></span></label>
     </div>
     <div class="toggle-row">
-      <span class="toggle-label">Session confirmation <span class="loan-notes">(off by default)</span></span>
+      <span class="toggle-label">Guest confirmation <span class="loan-notes">(off by default)</span></span>
       <label class="toggle-switch"><input type="checkbox" id="wa-toggle-guest"><span class="toggle-slider"></span></label>
     </div>
     <div class="form-group" style="margin-top:10px;">
@@ -484,7 +478,7 @@
       <div class="loan-notes">Variables: {memberName} {balance} {fee}</div>
     </div>
     <div class="form-group">
-      <label for="wa-tpl-guest-confirm">Session confirmation template</label>
+      <label for="wa-tpl-guest-confirm">Guest confirmation template</label>
       <textarea id="wa-tpl-guest-confirm" rows="3"></textarea>
       <div class="loan-notes">Variables: {memberName} {amount} {date}</div>
     </div>
@@ -632,7 +626,7 @@
     <span class="nav-icon">📅</span><span>Monthly</span>
   </button>
   <button class="nav-tab" data-screen="guest-screen">
-    <span class="nav-icon">🏸</span><span>Sessions</span>
+    <span class="nav-icon">🏸</span><span>Guest</span>
   </button>
 
   <button class="nav-tab" id="more-btn">
@@ -661,11 +655,11 @@
   </div>
 </div>
 
-<!-- ══ Sessions Payment Modal ═══════════════════════ -->
+<!-- ══ Guest Payment Modal ═══════════════════════════ -->
 <div class="modal-overlay" id="guest-payment-modal" hidden>
   <div class="modal">
     <div class="modal-title" id="guest-modal-member"></div>
-    <div class="modal-subtitle">Collect session fee</div>
+    <div class="modal-subtitle">Collect guest fee</div>
     <div id="guest-fee-hint" style="font-size:0.82rem;color:var(--text2);margin-bottom:8px;"></div>
     <div class="qr-container" id="guest-qr-container"></div>
     <div class="form-group">
@@ -695,7 +689,7 @@
       <input type="number" id="history-edit-amount" min="0.01" step="0.01" inputmode="decimal">
     </div>
     <div id="history-edit-fee-wrap" class="form-group" hidden>
-      <label for="history-edit-fee">Session fee (₹)</label>
+      <label for="history-edit-fee">Guest fee (₹)</label>
       <input type="number" id="history-edit-fee" min="0.01" step="0.01" inputmode="decimal">
     </div>
     <div class="form-group">

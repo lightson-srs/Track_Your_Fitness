@@ -13,7 +13,7 @@ const WhatsApp = (function () {
   var DEFAULTS = {
     TPL_MONTHLY_CONFIRM: 'Hi {memberName}, your monthly contribution of ₹{amount} received on {date}. Balance: ₹{balance}. Thank you!',
     TPL_MONTHLY_REMINDER: 'Hi {memberName}, this is a reminder for your monthly fitness contribution of ₹{fee}. Outstanding: ₹{balance}. Please pay at the earliest.',
-    TPL_GUEST_CONFIRM: 'Hi {memberName}, your session fee of ₹{amount} for {date} has been recorded. See you at the gym!',
+    TPL_GUEST_CONFIRM: 'Hi {memberName}, your guest fee of ₹{amount} for {date} has been recorded. See you at the gym!',
     TOGGLE_MONTHLY: '0',
     TOGGLE_GUEST: '0'
   };

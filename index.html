@@ -114,8 +114,12 @@
     </div>
   </div>
   <input type="text" id="member-search" placeholder="Search members…" class="search-input">
-  <div class="form-container" id="member-form-container" hidden>
-    <div class="form-title" id="member-form-title">Add member</div>
+  <div id="member-list"></div>
+
+  <!-- Add / Edit member modal -->
+  <div class="modal-overlay" id="member-form-container" hidden>
+   <div class="modal">
+    <div class="modal-title" id="member-form-title">Add member</div>
     <form id="member-form" novalidate>
       <div class="member-photo-section" style="text-align:center;margin-bottom:12px;">
         <div id="member-photo-preview" style="width:80px;height:80px;border-radius:50%;background:var(--bg3);margin:0 auto 8px;display:flex;align-items:center;justify-content:center;overflow:hidden;border:2px solid var(--border);">
@@ -162,8 +166,8 @@
         <button type="button" class="btn btn-secondary" id="member-cancel-btn">Cancel</button>
       </div>
     </form>
+   </div>
   </div>
-  <div id="member-list"></div>
 </main>
 
 <!-- ══ Contributions ══════════════════════════════════ -->

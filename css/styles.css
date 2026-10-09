@@ -543,3 +543,17 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 
 /* ── Member Photo ──────────────────────────────────── */
 .member-photo-section { flex-shrink: 0; }
+
+/* ── Activity report ─────────────────────────────────── */
+.ar-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.ar-chip { background: var(--bg3); border-radius: var(--radius); padding: 8px 12px; min-width: 72px; text-align: center; }
+.ar-chip-num { display: block; font-size: 1.2rem; font-weight: 700; color: var(--text); }
+.ar-chip-lbl { display: block; font-size: 0.7rem; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; }
+.ar-chart-wrap { position: relative; height: 200px; margin-bottom: 14px; }
+.ar-chart-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.ar-chart-half { flex: 1; min-width: 220px; }
+.ar-table-wrap { overflow-x: auto; }
+.ar-events { font-size: 0.78rem; line-height: 1.5; max-height: 240px; overflow-y: auto; }
+.ar-events > div { padding: 3px 0; border-bottom: 1px solid var(--border); }
+.ar-events > div:last-child { border-bottom: none; }
+.ar-events .ar-ev-time { color: var(--text3); }

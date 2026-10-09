@@ -270,6 +270,12 @@ const Contributions = (function () {
     var allCb = document.getElementById('bulk-select-all');
     if (allCb) allCb.checked = false;
 
+    // Audit one summary line per bulk-apply batch (not per member, to avoid
+    // flooding the log). name = member count for readability.
+    if (typeof Audit !== 'undefined' && (updated + enrolled + feeCreated) > 0) {
+      Audit.writeAudit('FA', { name: (updated + enrolled) + ' member(s)', amount: (parseFloat(fee) || 0).toFixed(2) });
+    }
+
     var resultParts = [];
     if (updated > 0)       resultParts.push(updated + ' updated');
     if (enrolled > 0)      resultParts.push(enrolled + ' newly enrolled');
@@ -377,12 +383,17 @@ const Contributions = (function () {
     };
 
     try {
+      var _wasEdit = !!_enrollContribId;
       if (_enrollContribId) {
         var existing = await DB.getContribution(_enrollContribId);
         if (existing) contrib.createdAt = existing.createdAt;
         await DB.updateContribution(contrib);
       } else {
         await DB.addContribution(contrib);
+      }
+      if (typeof Audit !== 'undefined') {
+        var _em = await DB.getMember(contrib.memberId);
+        Audit.writeAudit(_wasEdit ? 'EU' : 'EN', { name: _em ? _em.name : '', amount: (fee || 0).toFixed(2) });
       }
       hideEnrollForm();
       renderContribList();
@@ -393,7 +404,15 @@ const Contributions = (function () {
 
   async function deleteContrib(contribId) {
     if (!confirm('Remove monthly contribution for this member?')) return;
-    try { await DB.deleteContribution(contribId); renderContribList(); }
+    try {
+      var _dc = await DB.getContribution(contribId);
+      await DB.deleteContribution(contribId);
+      if (typeof Audit !== 'undefined') {
+        var _dm = _dc ? await DB.getMember(_dc.memberId) : null;
+        Audit.writeAudit('ED', { name: _dm ? _dm.name : '' });
+      }
+      renderContribList();
+    }
     catch (e) { alert('Could not remove: ' + e.message); }
   }
 

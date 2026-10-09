@@ -1,7 +1,7 @@
 const SyncEngine = (function () {
   'use strict';
 
-  const SYNCED_STORES = ['members', 'contributions', 'payments', 'expenses', 'guest_sessions', 'monthly_fee_records', 'attendance'];
+  const SYNCED_STORES = ['members', 'contributions', 'payments', 'expenses', 'guest_sessions', 'monthly_fee_records', 'attendance', 'audit'];
   const QUEUE_KEY = 'tyf_sync_queue';
   const DEVICE_ID_KEY = 'tyf_device_id';
 
@@ -28,7 +28,8 @@ const SyncEngine = (function () {
     expenses: { getAll: 'getAllExpenses', update: 'updateExpense', delete: 'deleteExpense', get: 'getExpense' },
     guest_sessions: { getAll: 'getAllGuestSessions', update: 'updateGuestSession', delete: 'deleteGuestSession', get: 'getGuestSession' },
     monthly_fee_records: { getAll: 'getAllMonthlyFeeRecords', update: 'updateMonthlyFeeRecord', delete: 'deleteMonthlyFeeRecord', get: 'getMonthlyFeeRecord' },
-    attendance: { getAll: 'getAllAttendance', update: 'updateAttendance', delete: 'deleteAttendance', get: 'getAttendance' }
+    attendance: { getAll: 'getAllAttendance', update: 'updateAttendance', delete: 'deleteAttendance', get: 'getAttendance' },
+    audit: { getAll: 'getAllAuditRecords', update: 'updateAuditRecord', delete: 'deleteAuditRecord', get: 'getAudit' }
   };
 
   var _suppressNotify = false;

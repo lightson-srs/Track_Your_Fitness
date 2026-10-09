@@ -258,6 +258,7 @@ const Members = (function () {
           if (!member.validTill && existing.validTill) member.validTill = existing.validTill;
         }
         await DB.updateMember(member);
+        if (typeof Audit !== 'undefined') Audit.writeAudit('MU', { name: member.name });
       } else {
         // License member limit — uses inline global from index.html
         if (window._checkMemberLimit) {
@@ -265,6 +266,7 @@ const Members = (function () {
           if (_mLimitErr) { showErrors([{ field: 'member-name', msg: _mLimitErr }]); return; }
         }
         await DB.addMember(member);
+        if (typeof Audit !== 'undefined') Audit.writeAudit('MC', { name: member.name });
       }
       hideForm();
       renderMemberList();
@@ -279,7 +281,12 @@ const Members = (function () {
 
   async function deleteMember(memberId) {
     if (!confirm('Delete this member and all their payment records?')) return;
-    try { await DB.deleteMemberCascade(memberId); renderMemberList(); }
+    try {
+      var _delM = await DB.getMember(memberId);
+      await DB.deleteMemberCascade(memberId);
+      if (typeof Audit !== 'undefined') Audit.writeAudit('MD', { name: _delM ? _delM.name : '' });
+      renderMemberList();
+    }
     catch (e) { alert('Could not delete member: ' + e.message); }
   }
 
@@ -287,7 +294,13 @@ const Members = (function () {
     var newStatus = currentStatus === 'inactive' ? 'active' : 'inactive';
     try {
       var m = await DB.getMember(memberId);
-      if (m) { m.status = newStatus; await DB.updateMember(m); }
+      if (m) {
+        m.status = newStatus;
+        await DB.updateMember(m);
+        if (typeof Audit !== 'undefined') {
+          Audit.writeAudit(newStatus === 'active' ? 'MR' : 'MU', { name: m.name });
+        }
+      }
       renderMemberList();
     } catch (e) { alert('Could not update status: ' + e.message); }
   }

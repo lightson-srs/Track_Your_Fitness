@@ -143,12 +143,16 @@ const Expenses = (function () {
     };
 
     try {
+      var _wasEdit = !!editingExpenseId;
       if (editingExpenseId) {
         var existing = await DB.getExpense(editingExpenseId);
         if (existing) expense.createdAt = existing.createdAt;
         await DB.updateExpense(expense);
       } else {
         await DB.addExpense(expense);
+      }
+      if (typeof Audit !== 'undefined') {
+        Audit.writeAudit(_wasEdit ? 'XU' : 'XC', { category: expense.category || '—', amount: (amount || 0).toFixed(2) });
       }
       hideForm();
       renderExpenseList();
@@ -157,7 +161,14 @@ const Expenses = (function () {
 
   async function deleteExpense(expenseId) {
     if (!confirm('Delete this expense?')) return;
-    try { await DB.deleteExpense(expenseId); renderExpenseList(); }
+    try {
+      var _dx = await DB.getExpense(expenseId);
+      await DB.deleteExpense(expenseId);
+      if (typeof Audit !== 'undefined' && _dx) {
+        Audit.writeAudit('XD', { category: _dx.category || '—', amount: (_dx.amount || 0).toFixed(2) });
+      }
+      renderExpenseList();
+    }
     catch (e) { alert('Could not delete: ' + e.message); }
   }
 

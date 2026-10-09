@@ -1,7 +1,7 @@
 const DB = (function () {
   'use strict';
   const DB_NAME = 'TrackYourFitness';
-  const DB_VERSION = 7;
+  const DB_VERSION = 8;
   let db = null;
 
   function generateId() {
@@ -76,6 +76,14 @@ const DB = (function () {
           as.createIndex('memberId', 'memberId', { unique: false });
           as.createIndex('date', 'date', { unique: false });
           as.createIndex('memberDate', ['memberId', 'date'], { unique: true });
+        }
+
+        // v8: audit store — append-only activity log (synced cross-device).
+        // Record: { id, t: epoch-ms, c: short code, p: params, day: 'YYYY-MM-DD' }
+        if (!database.objectStoreNames.contains('audit')) {
+          const au = database.createObjectStore('audit', { keyPath: 'id' });
+          au.createIndex('day', 'day', { unique: false });
+          au.createIndex('t', 't', { unique: false });
         }
       };
     });
@@ -302,6 +310,19 @@ const DB = (function () {
     });
   }
 
+  // ─── Audit (append-only activity log) ───
+  function addAuditRecord(a)        { stampRecord(a); return reqToPromise(getStore('audit','readwrite').add(a)).then(function(r) { notifySyncIfAvailable('audit', a, 'put'); return r; }); }
+  function getAudit(id)             { return reqToPromise(getStore('audit','readonly').get(id)); }
+  function getAllAuditRecords()      { return reqToPromise(getStore('audit','readonly').getAll()); }
+  // Sync engine applies remote audit records via "update" — audit is append-only
+  // so put() by id is a safe idempotent upsert.
+  function updateAuditRecord(a)     { stampRecord(a); return reqToPromise(getStore('audit','readwrite').put(a)).then(function(r) { notifySyncIfAvailable('audit', a, 'put'); return r; }); }
+  function deleteAuditRecord(id)    { return reqToPromise(getStore('audit','readwrite').delete(id)).then(function(r) { notifySyncIfAvailable('audit', {id:id}, 'delete'); return r; }); }
+  function getAuditByDateRange(startDay, endDay) {
+    // startDay/endDay are 'YYYY-MM-DD' day keys (inclusive).
+    return cursorCollect(getStore('audit','readonly'), 'day', IDBKeyRange.bound(startDay, endDay));
+  }
+
   // ─── Cascade delete ───
   async function deleteMemberCascade(memberId) {
     await deletePaymentsByMember(memberId);
@@ -360,6 +381,7 @@ const DB = (function () {
     addAttendance, getAttendance, getAllAttendance, updateAttendance, deleteAttendance,
     getAttendanceByMember, getAttendanceByDate, getAttendanceByMemberDate,
     getAttendanceByDateRange, saveAttendance, deleteAttendanceByMember,
+    addAuditRecord, getAudit, getAllAuditRecords, updateAuditRecord, deleteAuditRecord, getAuditByDateRange,
     deduplicateFeeRecords,
     deleteMemberCascade
   };

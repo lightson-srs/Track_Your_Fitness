@@ -599,7 +599,43 @@
       <input type="file" id="restore-file" accept=".json" hidden>
     </div>
   </div>
+  <div class="settings-section">
+    <h3>Activity report</h3>
+    <div class="loan-notes" style="margin-bottom:8px;">A history of app activity — members, fees, payments, guest sessions, attendance, and expenses — shown day by day with charts. Audit data syncs across your devices.</div>
+    <button class="btn btn-primary" id="activity-report-btn" style="width:100%;">📊 View activity report</button>
+  </div>
 </main>
+
+<!-- ══ Activity Report Modal ══════════════════════════ -->
+<div class="modal-overlay" id="activity-report-modal" hidden>
+  <div class="modal" style="max-width:760px;">
+    <div class="modal-title">📊 Activity report</div>
+    <div class="filter-bar" style="margin-bottom:8px;">
+      <div class="date-picker-wrap"><input type="date" id="ar-from" class="date-picker-hidden"><div class="date-picker-display" data-for="ar-from">From</div></div>
+      <div class="date-picker-wrap"><input type="date" id="ar-to" class="date-picker-hidden"><div class="date-picker-display" data-for="ar-to">To</div></div>
+      <button class="btn btn-sm btn-secondary" id="ar-reset-btn">Last 30 days</button>
+    </div>
+    <div id="ar-loading" class="empty-message">Loading…</div>
+    <div id="ar-error" class="error-message" hidden></div>
+    <div id="ar-content" hidden>
+      <div id="ar-summary" class="ar-summary"></div>
+      <div class="report-section-title">Daily activity</div>
+      <div id="ar-chart-fallback" class="loan-notes" hidden></div>
+      <div class="ar-chart-wrap"><canvas id="ar-bar-chart"></canvas></div>
+      <div class="ar-chart-row">
+        <div class="ar-chart-wrap ar-chart-half"><canvas id="ar-line-chart"></canvas></div>
+        <div class="ar-chart-wrap ar-chart-half"><canvas id="ar-donut-chart"></canvas></div>
+      </div>
+      <div class="report-section-title">Day-by-day</div>
+      <div id="ar-table" class="ar-table-wrap"></div>
+      <div class="report-section-title">Recent events</div>
+      <div id="ar-events" class="ar-events"></div>
+    </div>
+    <div class="form-actions" style="margin-top:12px;">
+      <button type="button" class="btn btn-secondary" id="ar-close-btn">Close</button>
+    </div>
+  </div>
+</div>
 
 <!-- ══ Bottom Navigation ══════════════════════════════ -->
 <!-- ══ More popup menu ════════════════════════════════ -->
@@ -801,6 +837,7 @@
 <script src="js/qrcode-lib.js"></script>
 <script src="js/license.js"></script>
 <script src="js/db.js"></script>
+<script src="js/audit.js"></script>
 <script src="js/settings.js"></script>
 <script src="js/license-registry-config.js"></script>
 <script src="js/firestore-config.js"></script>

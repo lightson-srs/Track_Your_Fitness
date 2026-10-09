@@ -264,6 +264,7 @@ const License = (function () {
         try { localStorage.setItem('tyf_license_key', raw); } catch (e) { if (errorEl) errorEl.textContent = 'Could not save: ' + e.message; return; }
 
         window._isLicensed = true;
+        if (typeof Audit !== 'undefined') Audit.writeAudit('LA', {});
         if (successEl) { successEl.textContent = '✓ License activated!'; successEl.removeAttribute('hidden'); }
         if (keyInput) keyInput.value = '';
         updateBanner();
@@ -275,6 +276,7 @@ const License = (function () {
     if (deactivateBtn) {
       deactivateBtn.addEventListener('click', function () {
         if (!confirm('Deactivate your license? The app will be locked.')) return;
+        if (typeof Audit !== 'undefined') Audit.writeAudit('LD', {});
         try { localStorage.removeItem('tyf_license_key'); } catch (e) {}
         window._isLicensed = false;
         updateBanner();

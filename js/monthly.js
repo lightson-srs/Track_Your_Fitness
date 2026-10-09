@@ -298,6 +298,7 @@ const Monthly = (function () {
       // sum(fee records ≤ date) - sum(payments ≤ date), same as Sessions logic.
       var member  = await DB.getMember(_pendingMemberId);
       var contrib = await DB.getContributionByMember(_pendingMemberId);
+      if (typeof Audit !== 'undefined') Audit.writeAudit('PM', { name: member ? member.name : '', amount: amount.toFixed(2) });
 
       // Update member's validTill to end of the paid billing period
       if (member && contrib) {

@@ -1,7 +1,7 @@
-const CACHE_NAME = 'track-your-fitness-v69';
+const CACHE_NAME = 'track-your-fitness-v70';
 const FILES_TO_CACHE = [
   './', './index.html', './css/styles.css',
-  './js/utils.js', './js/qrcode-lib.js', './js/license.js', './js/db.js', './js/settings.js',
+  './js/utils.js', './js/qrcode-lib.js', './js/license.js', './js/db.js', './js/audit.js', './js/settings.js',
   './js/license-registry-config.js', './js/firestore-config.js', './js/sync-engine.js', './js/setup-wizard.js', './js/license-registry.js',
   './js/members.js', './js/contributions.js',
   './js/monthly.js', './js/guestplay.js',

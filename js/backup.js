@@ -70,6 +70,7 @@ const Backup = (function () {
 
       Settings.setLastBackup(getTodayISO());
       displayLastBackupInfo();
+      if (typeof Audit !== 'undefined') Audit.writeAudit('BK', {});
 
       var counts = members.length + ' members, ' +
         contributions.length + ' contributions, ' +
@@ -198,6 +199,15 @@ const Backup = (function () {
 
         Settings.setLastBackup(getTodayISO());
         displayLastBackupInfo();
+
+        // Audit the restore. Awaited (not fire-and-forget) because the reload
+        // below would otherwise race the async write before it commits.
+        if (typeof Audit !== 'undefined' && typeof DB !== 'undefined' && DB.addAuditRecord) {
+          try {
+            var _rsNow = Date.now();
+            await DB.addAuditRecord({ id: DB.generateId(), t: _rsNow, c: 'RS', p: {}, day: Audit.dayKey(_rsNow) });
+          } catch (e) { /* non-fatal */ }
+        }
 
         alert('Restore complete!\n\n' +
           '  Members:        ' + members.length        + '\n' +

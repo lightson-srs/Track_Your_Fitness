@@ -336,6 +336,11 @@ const Attendance = (function () {
       if (msgEl) { msgEl.removeAttribute('hidden'); setTimeout(function () { msgEl.setAttribute('hidden', ''); }, 2500); }
     }
 
+    if (typeof Audit !== 'undefined') {
+      var presentNow = document.querySelectorAll('.att-checkbox:checked').length;
+      Audit.writeAudit('AT', { date: fmtDate(date), present: presentNow });
+    }
+
     // Draft is now persisted — clear it so the re-render reflects the saved DB
     // state (not the stale overlay).
     _attDraft = {}; _attDraftDate = null;
@@ -431,6 +436,7 @@ const Attendance = (function () {
       }
 
       await DB.saveAttendance(member.id, attDate, 'present');
+      if (typeof Audit !== 'undefined') Audit.writeAudit('AQ', { name: member.name, date: fmtDate(attDate) });
 
       var dueText = '';
       if (typeof Monthly !== 'undefined' && typeof Monthly.calcMemberBalance === 'function') {

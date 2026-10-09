@@ -35,6 +35,7 @@ var App = (function () {
       WhatsApp.init();
       Backup.init();
       if (typeof Attendance !== 'undefined') Attendance.init();
+      if (typeof Audit !== 'undefined' && Audit.initReport) Audit.initReport();
       setupTabNavigation();
       Settings.updateAppNameDisplay();
       initDatePickers();

@@ -212,6 +212,7 @@ const GuestPlay = (function () {
         createdAt: new Date().toISOString()
       };
       await DB.addGuestSession(session);
+      if (typeof Audit !== 'undefined') Audit.writeAudit('GC', { name: memberName || '', amount: (parseFloat(fee) || 0).toFixed(2) });
       renderGuestList();
     } catch (e) {
       alert('Could not enroll: ' + e.message);
@@ -225,6 +226,10 @@ const GuestPlay = (function () {
       var s = await DB.getGuestSession(sessionId);
       if (s && s.status === 'collected') { alert('Cannot remove a collected session.'); return; }
       await DB.deleteGuestSession(sessionId);
+      if (typeof Audit !== 'undefined' && s) {
+        var _gm = await DB.getMember(s.memberId);
+        Audit.writeAudit('GD', { name: _gm ? _gm.name : '' });
+      }
       renderGuestList();
     } catch (e) {
       alert('Could not remove session: ' + e.message);
@@ -300,6 +305,7 @@ const GuestPlay = (function () {
       // sum(session fees ≤ date) - sum(guest payments ≤ date), so partial payments
       // are handled correctly without touching session records.
       var member = await DB.getMember(_pendingMemberId);
+      if (typeof Audit !== 'undefined') Audit.writeAudit('PG', { name: member ? member.name : '', amount: amount.toFixed(2) });
       hidePaymentModal();
       renderGuestList();
 

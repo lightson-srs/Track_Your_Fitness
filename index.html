@@ -332,7 +332,10 @@
     <button class="btn btn-sm att-filter-btn" data-filter="all">All</button>
   </div>
   <div id="att-member-list"></div>
-  <button class="btn btn-primary" id="att-save-btn" style="width:100%;margin-top:8px;flex-shrink:0;">💾 Save Attendance</button>
+  <div style="display:flex;gap:8px;margin-top:8px;flex-shrink:0;">
+    <button class="btn btn-secondary" id="att-cancel-btn" style="flex:1;">Cancel</button>
+    <button class="btn btn-primary" id="att-save-btn" style="flex:2;">💾 Save Attendance</button>
+  </div>
   <div class="success-msg" id="att-save-msg" hidden style="text-align:center;">Attendance saved!</div>
   <div id="att-qr-scanner-container" hidden></div>
   <div id="att-scan-result" hidden></div>

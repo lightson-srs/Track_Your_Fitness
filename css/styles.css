@@ -205,7 +205,16 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 /* ── Modals ──────────────────────────────────────────── */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: flex-end; justify-content: center; z-index: 200; }
 .modal-overlay[hidden] { display: none; }
-.modal { background: var(--bg2); border-radius: 16px 16px 0 0; padding: 20px; width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; }
+.modal {
+  background: var(--bg2); border-radius: 16px 16px 0 0; padding: 20px;
+  padding-bottom: calc(20px + env(safe-area-inset-bottom)); /* clear iOS home indicator */
+  width: 100%; max-width: 480px;
+  max-height: 90vh;        /* fallback for older browsers */
+  max-height: 85dvh;       /* iOS: track the VISIBLE viewport (toolbars/keyboard) so Save/Cancel stay on screen */
+  overflow-y: auto;
+  overscroll-behavior: contain;        /* stop scroll from chaining to the page behind */
+  -webkit-overflow-scrolling: touch;   /* momentum scroll inside the modal on iOS */
+}
 .modal-title { font-size: 1.15rem; font-weight: 600; margin-bottom: 4px; }
 .modal-subtitle { font-size: 0.93rem; color: var(--text2); margin-bottom: 14px; }
 .qr-container { display: flex; justify-content: center; margin: 12px 0; }

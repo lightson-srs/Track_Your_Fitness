@@ -5,6 +5,22 @@ const Attendance = (function () {
   var _html5QrcodeLoaded = false;
   var _attendanceFilter = 'absent';
 
+  // In-memory draft of unsaved checkbox toggles for the CURRENT date:
+  // { memberId: 'present' | 'absent' }. Captured from the DOM before each
+  // re-render so switching tabs / searching preserves un-saved changes instead
+  // of reloading from the DB. Keyed by date so changing the date clears it.
+  var _attDraft = {};
+  var _attDraftDate = null;
+
+  // Snapshot the live checkbox states from the DOM into _attDraft, so a
+  // subsequent renderAttendance() can re-apply them (tab switch, search, etc.).
+  function captureDraft() {
+    var boxes = document.querySelectorAll('.att-checkbox');
+    boxes.forEach(function (cb) {
+      if (cb.dataset.memberId) _attDraft[cb.dataset.memberId] = cb.checked ? 'present' : 'absent';
+    });
+  }
+
   function esc(s) {
     return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') : '';
   }
@@ -29,6 +45,8 @@ const Attendance = (function () {
     if (copyYesterday) copyYesterday.addEventListener('click', showCopyDateModal);
     if (scanQrBtn) scanQrBtn.addEventListener('click', toggleQRScanner);
     if (saveBtn) saveBtn.addEventListener('click', handleSaveAttendance);
+    var cancelBtn = document.getElementById('att-cancel-btn');
+    if (cancelBtn) cancelBtn.addEventListener('click', handleCancelAttendance);
 
     // Copy date modal buttons
     var copyConfirmBtn = document.getElementById('att-copy-confirm-btn');
@@ -127,6 +145,11 @@ const Attendance = (function () {
     var includeInactiveCb = document.getElementById('att-include-inactive');
     var includeInactive = includeInactiveCb ? includeInactiveCb.checked : false;
 
+    // Preserve unsaved toggles across re-renders (tab switch / search). If the
+    // date changed, the draft belongs to a different day — discard it.
+    if (_attDraftDate !== date) { _attDraft = {}; _attDraftDate = date; }
+    else { captureDraft(); }
+
     container.innerHTML = '<p class="empty-message">Loading…</p>';
 
     try {
@@ -150,10 +173,16 @@ const Attendance = (function () {
         return;
       }
 
-      // Load existing attendance for selected date
+      // Load existing attendance for selected date (the saved baseline).
       var attendanceRecords = await DB.getAttendanceByDate(date);
       var attMap = {};
       attendanceRecords.forEach(function (r) { attMap[r.memberId] = r.status; });
+
+      // Overlay the unsaved draft so a toggle made on one tab is reflected on
+      // the others (and in the All tab) until the user Saves or Cancels.
+      for (var draftId in _attDraft) {
+        if (_attDraft.hasOwnProperty(draftId)) attMap[draftId] = _attDraft[draftId];
+      }
 
       var presentCount = 0;
       var html = '';
@@ -197,6 +226,8 @@ const Attendance = (function () {
       // Bind checkbox change to update UI (not DB yet — save button does that)
       container.querySelectorAll('.att-checkbox').forEach(function (cb) {
         cb.addEventListener('change', function () {
+          // Record the toggle in the draft so it persists across tab switches.
+          if (cb.dataset.memberId) _attDraft[cb.dataset.memberId] = cb.checked ? 'present' : 'absent';
           var row = cb.closest('.att-member-row');
           var label = row ? row.querySelector('.att-status-label') : null;
           if (cb.checked) {
@@ -247,6 +278,20 @@ const Attendance = (function () {
     updatePresentCount(checked ? checkboxes.length : 0);
   }
 
+  // --- Cancel button: discard unsaved changes ---
+  // Re-renders the list from the last SAVED state for the selected date,
+  // dropping any unsaved checkbox toggles. Stays on the attendance screen.
+  function handleCancelAttendance() {
+    var anyChecked = document.querySelectorAll('.att-checkbox:checked').length;
+    var msg = anyChecked
+      ? 'Discard unsaved attendance changes and reload the saved state?'
+      : 'Reload the saved attendance for this date?';
+    if (!confirm(msg)) return;
+    // Discard the unsaved draft, then reload the saved state.
+    _attDraft = {}; _attDraftDate = null;
+    renderAttendance();
+  }
+
   // --- Save Attendance button ---
   async function handleSaveAttendance() {
     var dateInput = document.getElementById('att-date');
@@ -290,6 +335,10 @@ const Attendance = (function () {
     } else {
       if (msgEl) { msgEl.removeAttribute('hidden'); setTimeout(function () { msgEl.setAttribute('hidden', ''); }, 2500); }
     }
+
+    // Draft is now persisted — clear it so the re-render reflects the saved DB
+    // state (not the stale overlay).
+    _attDraft = {}; _attDraftDate = null;
 
     // Re-render to confirm saved state
     renderAttendance();

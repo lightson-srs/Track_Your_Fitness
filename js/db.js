@@ -197,7 +197,7 @@ const DB = (function () {
       const req = getStore('payments','readwrite').index('memberId').openCursor(IDBKeyRange.only(memberId));
       req.onsuccess = (e) => {
         const cursor = e.target.result;
-        if (cursor) { cursor.delete(); cursor.continue(); } else resolve();
+        if (cursor) { var _id = cursor.value && cursor.value.id; cursor.delete(); if (_id) notifySyncIfAvailable('payments', {id:_id}, 'delete'); cursor.continue(); } else resolve();
       };
       req.onerror = (e) => reject(new Error(e.target.error?.message || 'Delete failed'));
     });
@@ -238,7 +238,7 @@ const DB = (function () {
       const req = getStore('monthly_fee_records','readwrite').index('memberId').openCursor(IDBKeyRange.only(memberId));
       req.onsuccess = (e) => {
         const cursor = e.target.result;
-        if (cursor) { cursor.delete(); cursor.continue(); } else resolve();
+        if (cursor) { var _id = cursor.value && cursor.value.id; cursor.delete(); if (_id) notifySyncIfAvailable('monthly_fee_records', {id:_id}, 'delete'); cursor.continue(); } else resolve();
       };
       req.onerror = (e) => reject(new Error(e.target.error?.message || 'Delete failed'));
     });
@@ -261,7 +261,7 @@ const DB = (function () {
       const req = getStore('guest_sessions','readwrite').index('memberId').openCursor(IDBKeyRange.only(memberId));
       req.onsuccess = (e) => {
         const cursor = e.target.result;
-        if (cursor) { cursor.delete(); cursor.continue(); } else resolve();
+        if (cursor) { var _id = cursor.value && cursor.value.id; cursor.delete(); if (_id) notifySyncIfAvailable('guest_sessions', {id:_id}, 'delete'); cursor.continue(); } else resolve();
       };
       req.onerror = (e) => reject(new Error(e.target.error?.message || 'Delete failed'));
     });
@@ -304,7 +304,7 @@ const DB = (function () {
       const req = getStore('attendance','readwrite').index('memberId').openCursor(IDBKeyRange.only(memberId));
       req.onsuccess = (e) => {
         const cursor = e.target.result;
-        if (cursor) { cursor.delete(); cursor.continue(); } else resolve();
+        if (cursor) { var _id = cursor.value && cursor.value.id; cursor.delete(); if (_id) notifySyncIfAvailable('attendance', {id:_id}, 'delete'); cursor.continue(); } else resolve();
       };
       req.onerror = (e) => reject(new Error(e.target.error?.message || 'Delete failed'));
     });
@@ -321,6 +321,47 @@ const DB = (function () {
   function getAuditByDateRange(startDay, endDay) {
     // startDay/endDay are 'YYYY-MM-DD' day keys (inclusive).
     return cursorCollect(getStore('audit','readonly'), 'day', IDBKeyRange.bound(startDay, endDay));
+  }
+
+  // ─── Orphan cleanup ───
+  // Removes child records whose memberId no longer matches any member. These
+  // arise from pre-fix member deletions where cascade deletes weren't synced:
+  // the member doc delete propagated but the child records survived in the DB
+  // and got re-synced back, showing as "Unknown" in reports. The single-record
+  // delete* functions used here ARE sync-aware, so these deletions propagate.
+  async function cleanupOrphans() {
+    try {
+      var members = await getAllMembers();
+      var valid = {};
+      members.forEach(function (m) { if (m && m.id) valid[m.id] = true; });
+
+      var removed = 0;
+      async function sweep(getAll, del) {
+        var all = await getAll();
+        for (var i = 0; i < all.length; i++) {
+          var r = all[i];
+          if (r && r.memberId && !valid[r.memberId]) {
+            try { await del(r.id); removed++; } catch (e) {}
+          }
+        }
+      }
+      await sweep(getAllPayments,           deletePayment);
+      await sweep(getAllGuestSessions,      deleteGuestSession);
+      await sweep(getAllMonthlyFeeRecords,  deleteMonthlyFeeRecord);
+      await sweep(getAllAttendance,         deleteAttendance);
+      // Contributions are keyed per member too.
+      var contribs = await getAllContributions();
+      for (var j = 0; j < contribs.length; j++) {
+        if (contribs[j] && contribs[j].memberId && !valid[contribs[j].memberId]) {
+          try { await deleteContribution(contribs[j].id); removed++; } catch (e) {}
+        }
+      }
+      if (removed > 0) console.log('DB: cleaned up ' + removed + ' orphaned record(s).');
+      return removed;
+    } catch (e) {
+      console.error('DB: cleanupOrphans error', e);
+      return 0;
+    }
   }
 
   // ─── Cascade delete ───
@@ -382,7 +423,7 @@ const DB = (function () {
     getAttendanceByMember, getAttendanceByDate, getAttendanceByMemberDate,
     getAttendanceByDateRange, saveAttendance, deleteAttendanceByMember,
     addAuditRecord, getAudit, getAllAuditRecords, updateAuditRecord, deleteAuditRecord, getAuditByDateRange,
-    deduplicateFeeRecords,
+    deduplicateFeeRecords, cleanupOrphans,
     deleteMemberCascade
   };
 })();

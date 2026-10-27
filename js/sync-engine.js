@@ -263,6 +263,7 @@ const SyncEngine = (function () {
             if (base !== undefined && remoteTs !== undefined && remoteTs !== base) {
               var conflictErr = new Error('conflict');
               conflictErr._tyfConflict = true;
+              conflictErr._tyfRemote = remoteData;   // carry remote so we can take-theirs locally
               throw conflictErr;
             }
           }
@@ -306,9 +307,13 @@ const SyncEngine = (function () {
         }
       } catch (err) {
         if (err && err._tyfConflict) {
-          // Reject ONLY this record: flag it, drop from the queue (do not retry
-          // forever), and continue pushing the rest.
-          flagConflict(entry.storeName, entry.docId, 'edited on another device since your change');
+          // TAKE THEIRS: another device changed this record since our base.
+          // Overwrite the local record with the remote version (re-baseline),
+          // log the lost local edit to the activity log, flag it, and drop the
+          // queue entry. This self-heals: the next save/refresh is smooth and
+          // no Full sync is needed.
+          try { await _resolveConflictTakeTheirs(entry.storeName, entry.docId, err._tyfRemote, entry.data); } catch (e2) {}
+          flagConflict(entry.storeName, entry.docId, 'your change was overwritten by another device (saved to activity log)');
           // entry intentionally NOT added to `remaining`.
         } else if (err && err.code === 'permission-denied') {
           // Rules blocked write — drop silently so we don't loop forever.
@@ -338,6 +343,64 @@ const SyncEngine = (function () {
           local._baseUpdatedAt = data.updatedAt;
           await DB[methods.update](local);
         }
+      }
+    } catch (e) {} finally {
+      DB.setSuppressStamp(false);
+      _suppressNotify = _prevSuppress;
+    }
+  }
+
+  // Build a short, human summary of the LOST local edit for the activity log:
+  // the fields where the discarded local value differs from the remote we kept.
+  // Ignores internal/sync fields. Returns '' if nothing meaningful to show.
+  function _lostEditDetail(localData, remoteData) {
+    try {
+      if (!localData) return '';
+      var skip = { id: 1, updatedAt: 1, version: 1, _baseUpdatedAt: 1, _lastModified: 1, _deviceId: 1 };
+      var parts = [];
+      Object.keys(localData).forEach(function (k) {
+        if (skip[k]) return;
+        var lv = localData[k], rv = remoteData ? remoteData[k] : undefined;
+        if (String(lv) !== String(rv)) {
+          parts.push(k + '=' + (lv === undefined || lv === null ? '' : String(lv)));
+        }
+      });
+      if (!parts.length) return '';
+      var s = parts.join(', ');
+      if (s.length > 160) s = s.slice(0, 157) + '…';
+      return ' · your value: ' + s;
+    } catch (e) { return ''; }
+  }
+
+  // Resolve a push conflict as TAKE-THEIRS: overwrite the local record with the
+  // remote version (re-baselined so it is no longer "dirty"), and record the
+  // lost local edit in the activity log. Writes are suppressed so they do not
+  // re-queue to the sync queue or re-stamp the record.
+  async function _resolveConflictTakeTheirs(storeName, docId, remoteData, lostLocalData) {
+    var methods = STORE_METHOD_MAP[storeName];
+    if (!methods) return;
+
+    // 1. Log the lost local edit (fire-and-forget audit; synced, append-only).
+    try {
+      if (typeof Audit !== 'undefined' && Audit.writeAudit) {
+        Audit.writeAudit('CF', { store: storeName, id: String(docId).slice(0, 8), detail: _lostEditDetail(lostLocalData, remoteData) });
+      }
+    } catch (e) {}
+
+    // 2. Overwrite local with remote (take-theirs) and re-baseline, suppressed.
+    var _prevSuppress = _suppressNotify;
+    _suppressNotify = true;
+    DB.setSuppressStamp(true);
+    try {
+      if (remoteData && (remoteData.id || docId)) {
+        var remote = Object.assign({}, remoteData);
+        if (!remote.id) remote.id = docId;
+        DB.markSynced(remote);
+        await DB[methods.update](remote);
+      } else {
+        // Remote has no usable body — delete the stale local record so it stops
+        // conflicting (its edit is already preserved in the activity log).
+        try { await DB[methods.delete](docId); } catch (e) {}
       }
     } catch (e) {} finally {
       DB.setSuppressStamp(false);
@@ -537,8 +600,23 @@ const SyncEngine = (function () {
           }
 
           // Both the local record and the remote changed independently → CONFLICT.
-          // Reject (keep local untouched, do NOT overwrite) and flag this record.
-          flagConflict(storeName, remoteId, 'changed on another device and locally');
+          // TAKE THEIRS: log the lost local edit to the activity log, then
+          // overwrite local with remote and re-baseline so it is no longer
+          // dirty (self-heals — no repeated conflict). Writes here are already
+          // inside the _suppressNotify + setSuppressStamp(true) block of fullMerge.
+          // Write the CF audit with notify un-suppressed so the audit record
+          // itself queues for sync (append-only), then restore suppression for
+          // the take-theirs overwrite below.
+          try {
+            if (typeof Audit !== 'undefined' && Audit.writeAudit) {
+              var _fmSuppress = _suppressNotify; _suppressNotify = false;
+              Audit.writeAudit('CF', { store: storeName, id: String(remoteId).slice(0, 8), detail: _lostEditDetail(localRec, remote) });
+              _suppressNotify = _fmSuppress;
+            }
+          } catch (e) {}
+          DB.markSynced(remote);
+          try { await DB[methods.update](remote); } catch (e) {}
+          flagConflict(storeName, remoteId, 'your change was overwritten by another device (saved to activity log)');
         }
       }
     } catch (e) {

@@ -45,7 +45,11 @@ const Audit = (function () {
     BK: 'Backup created',
     RS: 'Backup restored',
     LA: 'License activated',
-    LD: 'License deactivated'
+    LD: 'License deactivated',
+    // Sync conflict: this device's un-pushed edit was overwritten by another
+    // device's newer change (take-theirs). {store}=store, {id}=record id,
+    // {detail}=short summary of the lost local edit.
+    CF: 'Local edit overwritten by another device — {store} {id}{detail}'
   };
 
   // Category each code rolls up into for the day-wise counts/charts.
@@ -56,7 +60,7 @@ const Audit = (function () {
     GC: 'session', GD: 'session',
     AT: 'attendance', AQ: 'attendance',
     XC: 'expense', XU: 'expense', XD: 'expense',
-    BK: 'system',  RS: 'system',  LA: 'system',  LD: 'system'
+    BK: 'system',  RS: 'system',  LA: 'system',  LD: 'system',  CF: 'system'
   };
 
   // Category list used by the report (summary chips / chart series), in order.

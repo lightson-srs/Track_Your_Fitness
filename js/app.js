@@ -50,7 +50,10 @@ var App = (function () {
       Backup.checkBackupReminder();
 
       // Listen for sync complete — refresh current screen once
-      document.addEventListener('tyf-sync-update', function () {
+      document.addEventListener('tyf-sync-update', function (e) {
+        // Background syncs only redraw when they actually changed local data, so
+        // they never reset scroll/typing while the user is working.
+        if (e && e.detail && e.detail.silent && !e.detail.changed) return;
         refreshScreenData(currentScreen);
       });
 

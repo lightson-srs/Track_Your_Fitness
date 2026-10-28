@@ -33,6 +33,8 @@ const SyncEngine = (function () {
   };
 
   var _suppressNotify = false;
+  var _applied = 0;     // records written into the local DB by the current sync (drives UI refresh)
+  var _silent = false;  // true while a background (auto) sync runs — keeps the activity log quiet
 
   function generateUUID() {
     if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -75,6 +77,7 @@ const SyncEngine = (function () {
 
   // Safe bridge to the Settings activity log (no-op if Settings isn't loaded).
   function slog(status, msg) {
+    if (_silent && status === 'ok' && !_applied) return;   // background "nothing new" noise
     try { if (typeof Settings !== 'undefined' && Settings.logActivity) Settings.logActivity(status, msg); }
     catch (e) {}
   }
@@ -117,23 +120,42 @@ const SyncEngine = (function () {
 
   // --- Sync Queue ---
 
-  // If localStorage rejects a write (quota), the queue is held in memory so no
-  // pending change is dropped for the rest of the session.
-  var _memQueue = null;
+  // The queue lives in memory (loaded once) and is persisted to localStorage in
+  // ONE debounced write per burst of changes. Previously every record change
+  // parsed and re-stringified the whole queue, so saving 40+ records was O(n²)
+  // on the main thread. It is also flushed when the app is hidden/closed, so an
+  // iOS suspension doesn't lose pending changes. If storage rejects the write
+  // (quota) the in-memory queue still holds everything for this session.
+  var _q = null;
+  var _persistTimer = null;
 
   function getQueue() {
-    if (_memQueue) return _memQueue;
-    try { var raw = localStorage.getItem(QUEUE_KEY); return raw ? JSON.parse(raw) : []; }
-    catch (e) { return []; }
+    if (_q === null) {
+      try { var raw = localStorage.getItem(QUEUE_KEY); _q = raw ? JSON.parse(raw) : []; }
+      catch (e) { _q = []; }
+    }
+    return _q;
+  }
+
+  function _persistQueueNow() {
+    if (_persistTimer) { clearTimeout(_persistTimer); _persistTimer = null; }
+    if (_q === null) return;
+    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(_q)); }
+    catch (e) {
+      slog('err', 'Sync queue could not be saved to storage (' + _q.length + ' pending) — kept in memory; sync soon');
+    }
   }
 
   function saveQueue(queue) {
-    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(queue)); _memQueue = null; }
-    catch (e) {
-      _memQueue = queue;
-      slog('err', 'Sync queue could not be saved to storage (' + queue.length + ' pending) — kept in memory; sync soon');
-    }
+    _q = queue;
+    if (!_persistTimer) _persistTimer = setTimeout(_persistQueueNow, 150);
   }
+
+  // Flush before the page goes away / is backgrounded (iOS may kill it silently).
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') _persistQueueNow();
+  });
+  window.addEventListener('pagehide', _persistQueueNow);
 
   // Remove a pushed entry from the CURRENT queue, but only if it hasn't been
   // re-edited since the push snapshot (a newer edit has a different updatedAt).
@@ -204,6 +226,51 @@ const SyncEngine = (function () {
     queue = queue.filter(function (e) { return !(e.storeName === storeName && e.docId === docId); });
     queue.push({ storeName: storeName, docId: docId, operation: opType === 'delete' ? 'delete' : 'put', data: data });
     saveQueue(queue);
+    _scheduleAutoSync();
+  }
+
+  // ─── Automatic background sync ───
+  // Saving only QUEUES a change; nothing reached the DB until someone tapped 🔄
+  // or relaunched, so other devices saw data "later". Now:
+  //  • a save triggers a push (debounced) a few seconds later,
+  //  • the app syncs when it comes back to the foreground / network returns,
+  //  • and a light check (one tiny meta read) runs while the app is open.
+  // No Firestore listeners are used (avoids the old feedback loops).
+  var AUTO_PUSH_DELAY = 4000;
+  var POLL_INTERVAL = 45000;
+  var MIN_GAP = 15000;
+  var _autoTimer = null, _pollTimer = null, _lastSyncAt = 0, _bgStarted = false;
+
+  function _syncEnabled() {
+    return typeof FirestoreConfig !== 'undefined' && FirestoreConfig.isSyncEnabled() && FirestoreConfig.hasConfig();
+  }
+  function _online() { return typeof navigator === 'undefined' || navigator.onLine !== false; }
+
+  function _scheduleAutoSync() {
+    if (!_bgStarted || !_syncEnabled()) return;
+    if (_autoTimer) clearTimeout(_autoTimer);
+    _autoTimer = setTimeout(function () {
+      _autoTimer = null;
+      if (_online()) syncBackground().catch(function () {});
+    }, AUTO_PUSH_DELAY);
+  }
+
+  function _startBackground() {
+    if (_bgStarted) return;
+    _bgStarted = true;
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') {
+        if (Date.now() - _lastSyncAt > MIN_GAP && _online()) syncBackground().catch(function () {});
+      } else if (getQueue().length > 0 && _online()) {
+        syncBackground().catch(function () {});   // best effort before iOS suspends us
+      }
+    });
+    window.addEventListener('online', function () { syncBackground().catch(function () {}); });
+    _pollTimer = setInterval(function () {
+      if (document.visibilityState === 'visible' && _online() && Date.now() - _lastSyncAt > MIN_GAP) {
+        syncBackground().catch(function () {});
+      }
+    }, POLL_INTERVAL);
   }
 
   // ─── Firestore references ───
@@ -263,97 +330,113 @@ const SyncEngine = (function () {
 
     var remainingCount = 0;
 
-    for (var i = 0; i < queue.length; i++) {
-      var entry = queue[i];
+    // Entries whose collection can't be resolved stay queued.
+    queue = queue.filter(function (e) {
+      if (getCollectionRef(e.storeName)) return true;
+      remainingCount++;
+      return false;
+    });
+
+    // ONE transaction per batch (instead of one per record): 1 meta read + the
+    // remote docs read in parallel + a single commit. Revisions are allocated as
+    // a contiguous range, one change envelope per revision (same format as
+    // before, so devices on older code still replay correctly).
+    for (var start = 0; start < queue.length; start += PUSH_BATCH) {
+      var batch = queue.slice(start, start + PUSH_BATCH);
+      var res;
       try {
-        var dataColRef = getCollectionRef(entry.storeName);
-        if (!dataColRef) { remainingCount++; continue; }
-        var dataDocRef = dataColRef.doc(entry.docId);
-
-        await firestoreDb.runTransaction(async function (tx) {
-          // Read meta AND the current remote data doc for optimistic-concurrency.
-          var metaSnap = await tx.get(metaRef);
-          var remoteSnap = await tx.get(dataDocRef);
-
-          // ─── Optimistic concurrency check (reject-and-flag) ───
-          // Only meaningful for updates to an existing remote doc. A delete, or
-          // a create (remote missing), cannot conflict here.
-          if (entry.operation !== 'delete' && remoteSnap.exists) {
-            var remoteData = remoteSnap.data() || {};
-            var base = (entry.data && typeof entry.data._baseUpdatedAt === 'number')
-              ? entry.data._baseUpdatedAt : undefined;
-            var remoteTs = (typeof remoteData.updatedAt === 'number') ? remoteData.updatedAt : undefined;
-            // If we have a base and the remote moved past it → someone else edited
-            // this record while we were offline. Reject ONLY this record.
-            if (base !== undefined && remoteTs !== undefined && remoteTs !== base) {
-              var conflictErr = new Error('conflict');
-              conflictErr._tyfConflict = true;
-              conflictErr._tyfRemote = remoteData;   // carry remote so we can take-theirs locally
-              throw conflictErr;
-            }
-          }
-
-          var meta = metaSnap.exists ? (metaSnap.data() || {}) : {};
-          var generation = (typeof meta.generation === 'number') ? meta.generation : 1;
-          var revision = (typeof meta.revision === 'number') ? meta.revision : 0;
-          var nextRev = revision + 1;
-
-          // 1. Write/delete the data document (always keyed by stable id).
-          if (entry.operation === 'delete') {
-            tx.delete(dataDocRef);
-          } else {
-            // Accepted: this record is now in sync, so its base token equals its
-            // own updatedAt. Persist that on the uploaded doc too.
-            if (entry.data && typeof entry.data.updatedAt === 'number') {
-              entry.data._baseUpdatedAt = entry.data.updatedAt;
-            }
-            tx.set(dataDocRef, entry.data);
-          }
-
-          // 2. Write the change envelope at the new revision.
-          var changeDocRef = changesRef.doc(revisionDocId(nextRev));
-          tx.set(changeDocRef, {
-            rev: nextRev,
-            generation: generation,
-            store: entry.storeName,
-            docId: entry.docId,
-            op: entry.operation,
-            dev: getDeviceId(),
-            ts: Date.now()
-          });
-
-          // 3. Advance meta.
-          tx.set(metaRef, { generation: generation, revision: nextRev }, { merge: true });
-        });
-
-        // Accepted write — reflect the new base token in the local record so a
-        // later edit measures against the value we just uploaded.
-        if (entry.operation !== 'delete' && entry.data && entry.data.id) {
-          try { await _writeBackLocalBase(entry.storeName, entry.data); } catch (e) {}
-        }
-        // Pushed OK → drop just this entry (never rewrite the whole queue, which
-        // would erase changes the user saved while this push was running).
-        removeFromQueue(entry);
+        res = await _pushBatch(batch, metaRef, changesRef);
       } catch (err) {
-        if (err && err._tyfConflict) {
-          // TAKE THEIRS: another device changed this record since our base.
-          // Overwrite the local record with the remote version (re-baseline),
-          // log the lost local edit to the activity log, flag it, and drop the
-          // queue entry. This self-heals: the next save/refresh is smooth and
-          // no Full sync is needed.
-          try { await _resolveConflictTakeTheirs(entry.storeName, entry.docId, err._tyfRemote, entry.data); } catch (e2) {}
-          flagConflict(entry.storeName, entry.docId, 'your change was overwritten by another device (saved to activity log)');
-          removeFromQueue(entry);
-        } else if (err && err.code === 'permission-denied') {
+        if (err && err.code === 'permission-denied') {
           // Rules blocked write — drop so we don't loop forever.
-          removeFromQueue(entry);
-        } else {
-          remainingCount++;   // stays queued for the next sync
+          batch.forEach(removeFromQueue);
+          continue;
         }
+        // Network / contention failure: keep this and the rest queued for the next sync.
+        remainingCount += queue.length - start;
+        console.error('[SYNC] Push batch failed:', err);
+        break;
+      }
+
+      // Accepted writes — reflect the new base token in the local record so a
+      // later edit measures against the value we just uploaded.
+      for (var a = 0; a < res.accepted.length; a++) {
+        var ok = res.accepted[a];
+        if (ok.operation !== 'delete' && ok.data && ok.data.id) {
+          try { await _writeBackLocalBase(ok.storeName, ok.data); } catch (e) {}
+        }
+        // Drop just this entry (never rewrite the whole queue, which would erase
+        // changes the user saved while this push was running).
+        removeFromQueue(ok);
+      }
+
+      // Rejected records: TAKE THEIRS — another device changed the record since
+      // our base. Overwrite local with the remote version (re-baseline), log the
+      // lost local edit, flag it, and drop the queue entry. Only these records are
+      // rejected; the rest of the batch was committed.
+      for (var c = 0; c < res.conflicts.length; c++) {
+        var cf = res.conflicts[c];
+        try { await _resolveConflictTakeTheirs(cf.entry.storeName, cf.entry.docId, cf.remote, cf.entry.data); } catch (e2) {}
+        flagConflict(cf.entry.storeName, cf.entry.docId, 'your change was overwritten by another device (saved to activity log)');
+        removeFromQueue(cf.entry);
       }
     }
 
     if (remainingCount > 0) console.log('[SYNC] Push incomplete,', remainingCount, 'items remaining');
+  }
+
+  var PUSH_BATCH = 100;   // 2 writes per change + 1 meta write << Firestore's 500-op limit
+
+  async function _pushBatch(batch, metaRef, changesRef) {
+    return firestoreDb.runTransaction(async function (tx) {
+      // Reads first (Firestore requires all reads before any write). The body may
+      // re-run on contention, so all accumulators are local to this attempt.
+      var metaSnap = await tx.get(metaRef);
+      var remoteSnaps = await Promise.all(batch.map(function (entry) {
+        return entry.operation === 'delete' ? null : tx.get(getCollectionRef(entry.storeName).doc(entry.docId));
+      }));
+
+      var meta = metaSnap.exists ? (metaSnap.data() || {}) : {};
+      var generation = (typeof meta.generation === 'number') ? meta.generation : 1;
+      var revision = (typeof meta.revision === 'number') ? meta.revision : 0;
+
+      var accepted = [], conflicts = [];
+      var now = Date.now(), dev = getDeviceId();
+
+      batch.forEach(function (entry, i) {
+        var remoteSnap = remoteSnaps[i];
+        // Optimistic concurrency check (reject-and-flag): only meaningful for
+        // updates to an existing remote doc. A delete, or a create (remote
+        // missing), cannot conflict.
+        if (entry.operation !== 'delete' && remoteSnap && remoteSnap.exists) {
+          var remoteData = remoteSnap.data() || {};
+          var base = (entry.data && typeof entry.data._baseUpdatedAt === 'number') ? entry.data._baseUpdatedAt : undefined;
+          var remoteTs = (typeof remoteData.updatedAt === 'number') ? remoteData.updatedAt : undefined;
+          if (base !== undefined && remoteTs !== undefined && remoteTs !== base) {
+            conflicts.push({ entry: entry, remote: remoteData });
+            return;
+          }
+        }
+
+        revision++;
+        var dataDocRef = getCollectionRef(entry.storeName).doc(entry.docId);
+        if (entry.operation === 'delete') {
+          tx.delete(dataDocRef);
+        } else {
+          // Accepted: base token equals its own updatedAt on the uploaded doc too.
+          if (entry.data && typeof entry.data.updatedAt === 'number') entry.data._baseUpdatedAt = entry.data.updatedAt;
+          tx.set(dataDocRef, entry.data);
+        }
+        tx.set(changesRef.doc(revisionDocId(revision)), {
+          rev: revision, generation: generation, store: entry.storeName, docId: entry.docId,
+          op: entry.operation, dev: dev, ts: now
+        });
+        accepted.push(entry);
+      });
+
+      if (accepted.length) tx.set(metaRef, { generation: generation, revision: revision }, { merge: true });
+      return { accepted: accepted, conflicts: conflicts };
+    });
   }
 
   // After an accepted push, update the local record's _baseUpdatedAt so the next
@@ -426,6 +509,7 @@ const SyncEngine = (function () {
         if (!remote.id) remote.id = docId;
         DB.markSynced(remote);
         await DB[methods.update](remote);
+        _applied++;
       } else {
         // Remote has no usable body — delete the stale local record so it stops
         // conflicting (its edit is already preserved in the activity log).
@@ -459,33 +543,38 @@ const SyncEngine = (function () {
   // remote record. Records are located/written by id, never by index.
 
   async function applyRemoteDoc(storeName, docId, op) {
+    if (!STORE_METHOD_MAP[storeName]) return;
+    var snap = null;
+    if (op !== 'delete') {
+      var dataColRef = getCollectionRef(storeName);
+      if (!dataColRef) return;
+      snap = await dataColRef.doc(docId).get();
+    }
+    await _applyFetched(storeName, docId, op, snap);
+  }
+
+  // Apply one remote change given its already-fetched data doc (null for deletes).
+  async function _applyFetched(storeName, docId, op, snap) {
     var methods = STORE_METHOD_MAP[storeName];
     if (!methods) return;
 
     if (op === 'delete') {
-      try { await DB[methods.delete](docId); } catch (e) {}
+      try { await DB[methods.delete](docId); _applied++; } catch (e) {}
       return;
     }
 
-    var dataColRef = getCollectionRef(storeName);
-    if (!dataColRef) return;
-    try {
-      var snap = await dataColRef.doc(docId).get();
-      if (!snap.exists) {
-        // Envelope says put but doc is gone — treat as delete for convergence.
-        try { await DB[methods.delete](docId); } catch (e) {}
-        return;
-      }
-      var remote = snap.data();
-      if (!remote || !remote.id) remote = Object.assign({ id: docId }, remote || {});
-      // A local edit still waiting to push must not be clobbered by replaying an
-      // older remote version; push() will reconcile it via the concurrency check.
-      if (isQueued(storeName, docId)) return;
-      await putRemoteRecord(storeName, remote);
-    } catch (e) {
-      // Re-throw so the caller does NOT advance the cursor past a failed apply.
-      throw e;
+    if (!snap || !snap.exists) {
+      // Envelope says put but doc is gone — treat as delete for convergence.
+      try { await DB[methods.delete](docId); _applied++; } catch (e) {}
+      return;
     }
+    var remote = snap.data();
+    if (!remote || !remote.id) remote = Object.assign({ id: docId }, remote || {});
+    // A local edit still waiting to push must not be clobbered by replaying an
+    // older remote version; push() will reconcile it via the concurrency check.
+    if (isQueued(storeName, docId)) return;
+    // Throws on failure so the caller does NOT advance the cursor past it.
+    await putRemoteRecord(storeName, remote);
   }
 
   // Write a record that came FROM the server (stamping already suppressed by the
@@ -511,6 +600,7 @@ const SyncEngine = (function () {
     }
     DB.markSynced(remote);
     await DB[methods.update](remote);
+    _applied++;
     return true;
   }
 
@@ -538,49 +628,72 @@ const SyncEngine = (function () {
     var changesRef = getChangesColRef();
     if (!changesRef) return false;
 
+    // ONE range query for all missing envelopes (was 2 sequential reads per
+    // revision). Needs only the automatic single-field index on `rev`.
+    var snap;
+    try {
+      snap = await changesRef.where('rev', '>', local.revision).where('rev', '<=', remoteMeta.revision).orderBy('rev').get();
+    } catch (e) {
+      console.error('[SYNC] change range read failed', e);
+      return false; // network/read error — fall back, keep cursor
+    }
+
+    // The stream must be complete and contiguous: local+1 … remote. Any gap
+    // means we cannot safely skip a revision → full reconciliation.
+    var expected = remoteMeta.revision - local.revision;
+    var changes = snap.docs.map(function (d) { return d.data() || {}; });
+    if (changes.length !== expected) {
+      console.warn('[SYNC] change stream has', changes.length, 'of', expected, 'revisions → full reconciliation');
+      return false;
+    }
+    var myDev = getDeviceId();
+    var last = {};   // store|docId → latest change (revision order)
+    for (var i = 0; i < changes.length; i++) {
+      var ch = changes[i];
+      if (ch.rev !== local.revision + 1 + i || ch.generation !== remoteMeta.generation) return false;
+      // Our own pushed change is already applied locally — skip re-reading it.
+      if (ch.dev && ch.dev === myDev) continue;
+      last[ch.store + '|' + ch.docId] = ch;
+    }
+    var todo = Object.keys(last).map(function (k) { return last[k]; })
+      .sort(function (a, b) { return a.rev - b.rev; });
+
     _suppressNotify = true;
     DB.setSuppressStamp(true);
     try {
-      // Process revisions strictly in order: local+1, local+2, …, remote.
-      for (var rev = local.revision + 1; rev <= remoteMeta.revision; rev++) {
-        var changeSnap;
-        try {
-          changeSnap = await changesRef.doc(revisionDocId(rev)).get();
-        } catch (e) {
-          console.error('[SYNC] change read failed at rev', rev, e);
-          return false; // network/read error — fall back, keep cursor
+      // Fetch every changed doc with bounded parallelism (deletes need no read).
+      var fetched = new Array(todo.length);
+      var next = 0;
+      async function worker() {
+        while (next < todo.length) {
+          var idx = next++;
+          var t = todo[idx];
+          if (t.op === 'delete') continue;
+          fetched[idx] = await getCollectionRef(t.store).doc(t.docId).get();
         }
+      }
+      var workers = [];
+      for (var w = 0; w < PULL_CONCURRENCY; w++) workers.push(worker());
+      try { await Promise.all(workers); }
+      catch (e) { console.error('[SYNC] doc fetch failed → fall back', e); return false; }
 
-        if (!changeSnap.exists) {
-          // A revision is missing from the stream — cannot safely skip it.
-          console.warn('[SYNC] missing revision', rev, '→ full reconciliation');
-          return false;
-        }
-
-        var change = changeSnap.data() || {};
-        if (change.generation !== remoteMeta.generation) {
-          // Envelope belongs to a different generation — history is inconsistent.
-          return false;
-        }
-
-        try {
-          // Our own pushed change is already applied locally — skip re-reading it.
-          if (change.dev && change.dev === getDeviceId()) { setLocalCursor(remoteMeta.generation, rev); continue; }
-          await applyRemoteDoc(change.store, change.docId, change.op);
-        } catch (e) {
-          console.error('[SYNC] apply failed at rev', rev, '→ keep cursor, fall back', e);
+      // Apply in revision order, by id. Cursor advances only after ALL applied.
+      for (var j = 0; j < todo.length; j++) {
+        try { await _applyFetched(todo[j].store, todo[j].docId, todo[j].op, fetched[j]); }
+        catch (e) {
+          console.error('[SYNC] apply failed at rev', todo[j].rev, '→ keep cursor, fall back', e);
           return false; // do NOT advance cursor past a failed apply
         }
-
-        // Persist the cursor only after this revision applied successfully.
-        setLocalCursor(remoteMeta.generation, rev);
       }
+      setLocalCursor(remoteMeta.generation, remoteMeta.revision);
       return true;
     } finally {
       _suppressNotify = false;
       DB.setSuppressStamp(false);
     }
   }
+
+  var PULL_CONCURRENCY = 8;
 
   // ─── Full merge (authoritative reconciliation / regular merge) ───
   // Used on first sync, when there is no version info in the DB, when the local
@@ -764,20 +877,37 @@ const SyncEngine = (function () {
     return _syncWaiting;
   }
 
-  async function _syncOnce() {
-    if (status !== 'connected') {
-      var connected = await connect();
-      if (!connected) { slog('err', 'Quick sync: not connected'); return; }
+  // Background (auto) sync: same work, but quiet — it only asks the UI to redraw
+  // when it actually changed local data, so it never disturbs what the user is doing.
+  var _bgWaiting = null;
+  function syncBackground() {
+    if (!_syncEnabled()) return Promise.resolve();
+    if (_bgWaiting) return _bgWaiting;
+    _bgWaiting = _exclusive(function () { _bgWaiting = null; return _syncOnce(true); });
+    return _bgWaiting;
+  }
+
+  async function _syncOnce(silent) {
+    _silent = !!silent;
+    _applied = 0;
+    try {
+      if (status !== 'connected') {
+        var connected = await connect();
+        if (!connected) { slog('err', 'Quick sync: not connected'); return; }
+      }
+      slog('ok', 'Quick sync: push + Sync V2 check');
+      await push();
+      // pull() advances the cursor only to what it actually applied. We must NOT
+      // jump to a freshly-read head here: revisions other devices pushed while we
+      // were pulling would be skipped forever.
+      var reconciled = await pull();
+      if (reconciled) await _housekeeping();
+      _lastSyncAt = Date.now();
+      // Tell the UI once after sync, and how much local data actually changed.
+      document.dispatchEvent(new CustomEvent('tyf-sync-update', { detail: { changed: _applied, silent: !!silent } }));
+    } finally {
+      _silent = false;
     }
-    slog('ok', 'Quick sync: push + Sync V2 check');
-    await push();
-    // pull() advances the cursor only to what it actually applied. We must NOT
-    // jump to a freshly-read head here: revisions other devices pushed while we
-    // were pulling would be skipped forever.
-    var reconciled = await pull();
-    if (reconciled) await _housekeeping();
-    // Refresh UI once after sync
-    document.dispatchEvent(new CustomEvent('tyf-sync-update'));
   }
 
   // --- Full sync: explicit, authoritative reconciliation from the DB ---
@@ -923,7 +1053,8 @@ const SyncEngine = (function () {
   async function init() {
     if (typeof FirestoreConfig === 'undefined') { status = 'disabled'; return; }
     if (!FirestoreConfig.isSyncEnabled() || !FirestoreConfig.hasConfig()) { status = 'disabled'; return; }
-    // Connect and do one sync on startup
+    // Connect and do one sync on startup, then keep syncing in the background.
+    _startBackground();
     await sync();
   }
 
@@ -947,6 +1078,7 @@ const SyncEngine = (function () {
     notifyChange: notifyChange,
     getStatus: getStatus,
     flushQueue: flushQueue,
+    syncBackground: syncBackground,
     fullSync: fullSync,
     getQueueSize: getQueueSize,
     getConflicts: getConflicts,

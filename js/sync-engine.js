@@ -117,14 +117,39 @@ const SyncEngine = (function () {
 
   // --- Sync Queue ---
 
+  // If localStorage rejects a write (quota), the queue is held in memory so no
+  // pending change is dropped for the rest of the session.
+  var _memQueue = null;
+
   function getQueue() {
+    if (_memQueue) return _memQueue;
     try { var raw = localStorage.getItem(QUEUE_KEY); return raw ? JSON.parse(raw) : []; }
     catch (e) { return []; }
   }
 
   function saveQueue(queue) {
-    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(queue)); }
-    catch (e) { /* quota exceeded - trim */ try { localStorage.setItem(QUEUE_KEY, JSON.stringify(queue.slice(-50))); } catch(e2){} }
+    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(queue)); _memQueue = null; }
+    catch (e) {
+      _memQueue = queue;
+      slog('err', 'Sync queue could not be saved to storage (' + queue.length + ' pending) — kept in memory; sync soon');
+    }
+  }
+
+  // Remove a pushed entry from the CURRENT queue, but only if it hasn't been
+  // re-edited since the push snapshot (a newer edit has a different updatedAt).
+  function removeFromQueue(entry) {
+    var upd = entry.data ? entry.data.updatedAt : undefined;
+    var q = getQueue().filter(function (e) {
+      if (e.storeName !== entry.storeName || e.docId !== entry.docId) return true;
+      if (e.operation !== entry.operation) return true;
+      return (e.data ? e.data.updatedAt : undefined) !== upd;
+    });
+    saveQueue(q);
+  }
+
+  function isQueued(storeName, docId) {
+    var id = String(docId);
+    return getQueue().some(function (e) { return e.storeName === storeName && e.docId === id; });
   }
 
   function getQueueSize() { return getQueue().length; }
@@ -236,13 +261,13 @@ const SyncEngine = (function () {
     var changesRef = getChangesColRef();
     if (!metaRef || !changesRef) return;
 
-    var remaining = [];
+    var remainingCount = 0;
 
     for (var i = 0; i < queue.length; i++) {
       var entry = queue[i];
       try {
         var dataColRef = getCollectionRef(entry.storeName);
-        if (!dataColRef) { remaining.push(entry); continue; }
+        if (!dataColRef) { remainingCount++; continue; }
         var dataDocRef = dataColRef.doc(entry.docId);
 
         await firestoreDb.runTransaction(async function (tx) {
@@ -293,6 +318,7 @@ const SyncEngine = (function () {
             store: entry.storeName,
             docId: entry.docId,
             op: entry.operation,
+            dev: getDeviceId(),
             ts: Date.now()
           });
 
@@ -305,6 +331,9 @@ const SyncEngine = (function () {
         if (entry.operation !== 'delete' && entry.data && entry.data.id) {
           try { await _writeBackLocalBase(entry.storeName, entry.data); } catch (e) {}
         }
+        // Pushed OK → drop just this entry (never rewrite the whole queue, which
+        // would erase changes the user saved while this push was running).
+        removeFromQueue(entry);
       } catch (err) {
         if (err && err._tyfConflict) {
           // TAKE THEIRS: another device changed this record since our base.
@@ -314,17 +343,17 @@ const SyncEngine = (function () {
           // no Full sync is needed.
           try { await _resolveConflictTakeTheirs(entry.storeName, entry.docId, err._tyfRemote, entry.data); } catch (e2) {}
           flagConflict(entry.storeName, entry.docId, 'your change was overwritten by another device (saved to activity log)');
-          // entry intentionally NOT added to `remaining`.
+          removeFromQueue(entry);
         } else if (err && err.code === 'permission-denied') {
-          // Rules blocked write — drop silently so we don't loop forever.
+          // Rules blocked write — drop so we don't loop forever.
+          removeFromQueue(entry);
         } else {
-          remaining.push(entry);
+          remainingCount++;   // stays queued for the next sync
         }
       }
     }
 
-    saveQueue(remaining);
-    if (remaining.length > 0) console.log('[SYNC] Push incomplete,', remaining.length, 'items remaining');
+    if (remainingCount > 0) console.log('[SYNC] Push incomplete,', remainingCount, 'items remaining');
   }
 
   // After an accepted push, update the local record's _baseUpdatedAt so the next
@@ -449,14 +478,40 @@ const SyncEngine = (function () {
       }
       var remote = snap.data();
       if (!remote || !remote.id) remote = Object.assign({ id: docId }, remote || {});
-      // This record now reflects the server; set its base token so a later local
-      // edit is measured against this value for optimistic-concurrency checks.
-      DB.markSynced(remote);
-      await DB[methods.update](remote);
+      // A local edit still waiting to push must not be clobbered by replaying an
+      // older remote version; push() will reconcile it via the concurrency check.
+      if (isQueued(storeName, docId)) return;
+      await putRemoteRecord(storeName, remote);
     } catch (e) {
       // Re-throw so the caller does NOT advance the cursor past a failed apply.
       throw e;
     }
+  }
+
+  // Write a record that came FROM the server (stamping already suppressed by the
+  // caller). Marks it synced. Attendance has a unique member+date index, so two
+  // devices that created rows for the same member+date with different ids are
+  // reconciled deterministically here instead of failing with ConstraintError:
+  // the newer updatedAt wins (tie → larger id), and every device picks the same
+  // winner. Returns true if the remote record was stored.
+  async function putRemoteRecord(storeName, remote) {
+    var methods = STORE_METHOD_MAP[storeName];
+    // Both stores have a unique member+date index (see db.js).
+    var twinLookup = storeName === 'attendance' ? DB.getAttendanceByMemberDate
+                   : storeName === 'monthly_fee_records' ? DB.getMonthlyFeeRecordByMemberDate : null;
+    if (twinLookup && remote.memberId && remote.date) {
+      var twin = await twinLookup(remote.memberId, remote.date);
+      if (twin && twin.id !== remote.id) {
+        var tTs = (typeof twin.updatedAt === 'number') ? twin.updatedAt : 0;
+        var rTs = (typeof remote.updatedAt === 'number') ? remote.updatedAt : 0;
+        var remoteWins = rTs > tTs || (rTs === tTs && String(remote.id) > String(twin.id));
+        if (!remoteWins) return false;
+        await DB[methods.delete](twin.id);   // loser; notify is suppressed by caller
+      }
+    }
+    DB.markSynced(remote);
+    await DB[methods.update](remote);
+    return true;
   }
 
   // ─── Incremental pull: replay version history from local cursor ───
@@ -509,6 +564,8 @@ const SyncEngine = (function () {
         }
 
         try {
+          // Our own pushed change is already applied locally — skip re-reading it.
+          if (change.dev && change.dev === getDeviceId()) { setLocalCursor(remoteMeta.generation, rev); continue; }
           await applyRemoteDoc(change.store, change.docId, change.op);
         } catch (e) {
           console.error('[SYNC] apply failed at rev', rev, '→ keep cursor, fall back', e);
@@ -536,6 +593,7 @@ const SyncEngine = (function () {
     if (!collectionName) return;
 
     console.log('[SYNC] Full merge (regular merge / authoritative reconciliation)');
+    var mergeFailed = 0;   // records that could not be stored — caller must not adopt the head cursor
     _suppressNotify = true;
     DB.setSuppressStamp(true);
 
@@ -576,8 +634,7 @@ const SyncEngine = (function () {
 
           if (!localRec) {
             // Remote-only record → add it locally (now in sync).
-            DB.markSynced(remote);
-            try { await DB[methods.update](remote); } catch (e) {}
+            try { await putRemoteRecord(storeName, remote); } catch (e) { mergeFailed++; slog('err', 'Merge: could not store ' + storeName + ' ' + String(remoteId).slice(0, 8) + ' — ' + (e && e.message)); }
             continue;
           }
 
@@ -588,7 +645,7 @@ const SyncEngine = (function () {
 
           if (!localDirty) {
             // Local has no un-pushed edit → accept the remote value.
-            if (rTs !== lTs) { DB.markSynced(remote); try { await DB[methods.update](remote); } catch (e) {} }
+            if (rTs !== lTs) { try { await putRemoteRecord(storeName, remote); } catch (e) { mergeFailed++; slog('err', 'Merge: could not update ' + storeName + ' ' + String(remoteId).slice(0, 8) + ' — ' + (e && e.message)); } }
             continue;
           }
 
@@ -614,8 +671,7 @@ const SyncEngine = (function () {
               _suppressNotify = _fmSuppress;
             }
           } catch (e) {}
-          DB.markSynced(remote);
-          try { await DB[methods.update](remote); } catch (e) {}
+          try { await putRemoteRecord(storeName, remote); } catch (e) { mergeFailed++; slog('err', 'Merge: could not apply ' + storeName + ' ' + String(remoteId).slice(0, 8) + ' — ' + (e && e.message)); }
           flagConflict(storeName, remoteId, 'your change was overwritten by another device (saved to activity log)');
         }
       }
@@ -626,6 +682,7 @@ const SyncEngine = (function () {
       _suppressNotify = false;
       DB.setSuppressStamp(false);
     }
+    return mergeFailed;
   }
 
   // ─── Pull: choose incremental vs full merge based on version history ───
@@ -640,8 +697,7 @@ const SyncEngine = (function () {
     if (!remoteMeta) {
       // No version info in the DB → regular merge, then seed meta on next push.
       slog('ok', 'No version info in DB → full merge');
-      await fullMerge();
-      return;
+      return (await fullMerge()) === 0;
     }
 
     var local = getLocalCursor();
@@ -649,7 +705,7 @@ const SyncEngine = (function () {
     // nothing to download beyond the /sync/meta read we just did.
     if (local.generation === remoteMeta.generation && local.revision === remoteMeta.revision) {
       slog('ok', 'Up to date (rev ' + remoteMeta.revision + ') — cache-first, no download');
-      return;
+      return true;
     }
 
     // Try incremental replay from the local cursor.
@@ -667,25 +723,59 @@ const SyncEngine = (function () {
       // Local version not in the DB's history (or replay failed) → regular merge,
       // then adopt the remote cursor as our new baseline.
       slog('ok', 'Cursor not in history → full merge, adopt rev ' + remoteMeta.revision);
-      await fullMerge();
-      setLocalCursor(remoteMeta.generation, remoteMeta.revision);
+      var failed = await fullMerge();
+      // Adopt the head we read BEFORE merging (anything newer is replayed next
+      // time) — and only if every record was stored, so nothing is skipped.
+      if (failed === 0) setLocalCursor(remoteMeta.generation, remoteMeta.revision);
+      else slog('err', 'Full merge: ' + failed + ' record(s) failed — cursor not advanced, will retry');
+      return failed === 0;
     }
+    return true;
+  }
+
+  // Local-only housekeeping (orphan / duplicate cleanup). Runs ONLY after a sync
+  // that fully reconciled and left nothing queued, i.e. when "this member isn't
+  // on this device" really does mean "this member no longer exists". These
+  // deletes are never pushed (see DB._localOnly).
+  async function _housekeeping() {
+    try {
+      if (getQueue().length > 0) return;
+      await DB.deduplicateFeeRecords();
+      var removed = await DB.cleanupOrphans();
+      if (removed > 0) slog('ok', 'Cleaned up ' + removed + ' orphaned local record(s)');
+    } catch (e) {}
   }
 
   // --- Sync: push then pull (the only entry point) ---
 
-  async function sync() {
+  // Serialize all sync work (startup, 🔄 button, Full sync) so two runs never
+  // interleave. Calls made while one is merely *waiting* share that waiting run.
+  var _lock = Promise.resolve();
+  var _syncWaiting = null;
+  function _exclusive(fn) {
+    var run = _lock.then(fn);
+    _lock = run.catch(function () {});
+    return run;
+  }
+
+  function sync() {
+    if (_syncWaiting) return _syncWaiting;
+    _syncWaiting = _exclusive(function () { _syncWaiting = null; return _syncOnce(); });
+    return _syncWaiting;
+  }
+
+  async function _syncOnce() {
     if (status !== 'connected') {
       var connected = await connect();
       if (!connected) { slog('err', 'Quick sync: not connected'); return; }
     }
     slog('ok', 'Quick sync: push + Sync V2 check');
     await push();
-    await pull();
-    // After a push that created new revisions, align our cursor to the head so
-    // the next reload is cache-first and doesn't re-apply our own changes.
-    var afterMeta = await readRemoteMeta();
-    if (afterMeta) setLocalCursor(afterMeta.generation, afterMeta.revision);
+    // pull() advances the cursor only to what it actually applied. We must NOT
+    // jump to a freshly-read head here: revisions other devices pushed while we
+    // were pulling would be skipped forever.
+    var reconciled = await pull();
+    if (reconciled) await _housekeeping();
     // Refresh UI once after sync
     document.dispatchEvent(new CustomEvent('tyf-sync-update'));
   }
@@ -696,7 +786,9 @@ const SyncEngine = (function () {
   // always pushes dirty local changes and then performs a full merge against
   // every collection regardless of the cursor, then adopts the remote head.
   // Still non-destructive: full merge never deletes local-only records.
-  async function fullSync() {
+  function fullSync() { return _exclusive(_fullSyncOnce); }
+
+  async function _fullSyncOnce() {
     if (status !== 'connected') {
       var connected = await connect();
       if (!connected) { slog('err', 'Full sync: not connected'); return false; }
@@ -704,14 +796,21 @@ const SyncEngine = (function () {
     slog('ok', 'Full sync from DB: starting (push + full merge)…');
     try {
       await push();
-      await fullMerge();
-      var afterMeta = await readRemoteMeta();
-      if (afterMeta) {
-        setLocalCursor(afterMeta.generation, afterMeta.revision);
-        slog('ok', 'Full sync complete → rev ' + afterMeta.revision);
+      // Read the head BEFORE merging: changes pushed meanwhile get replayed next sync.
+      var beforeMeta = await readRemoteMeta();
+      var failed = await fullMerge();
+      if (failed > 0) {
+        slog('err', 'Full sync: ' + failed + ' record(s) could not be stored — cursor not advanced');
+        document.dispatchEvent(new CustomEvent('tyf-sync-update'));
+        return false;
+      }
+      if (beforeMeta) {
+        setLocalCursor(beforeMeta.generation, beforeMeta.revision);
+        slog('ok', 'Full sync complete → rev ' + beforeMeta.revision);
       } else {
         slog('ok', 'Full sync complete (no version meta yet)');
       }
+      await _housekeeping();
       document.dispatchEvent(new CustomEvent('tyf-sync-update'));
       return true;
     } catch (e) {

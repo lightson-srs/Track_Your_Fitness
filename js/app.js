@@ -19,8 +19,14 @@ var App = (function () {
         }
       } catch(e) {}
       await DB.init();
-      await DB.deduplicateFeeRecords();
-      try { await DB.cleanupOrphans(); } catch (e) {}
+      // With cloud sync on, orphan/duplicate cleanup runs AFTER a clean sync
+      // (SyncEngine._housekeeping) — never at launch, when members may simply not
+      // have arrived on this device yet. Without sync, local data is the truth.
+      var _syncOn = typeof FirestoreConfig !== 'undefined' && FirestoreConfig.isSyncEnabled() && FirestoreConfig.hasConfig();
+      if (!_syncOn) {
+        await DB.deduplicateFeeRecords();
+        try { await DB.cleanupOrphans(); } catch (e) {}
+      }
       if (typeof SetupWizard !== 'undefined') SetupWizard.init();
       if (typeof SyncEngine !== 'undefined') SyncEngine.init();
       if (typeof LicenseRegistry !== 'undefined') LicenseRegistry.report();

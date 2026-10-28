@@ -114,7 +114,12 @@ const DB = (function () {
   }
 
   // ─── Sync notification hook ───
+  // Housekeeping (orphan/duplicate cleanup) must be LOCAL-ONLY: a delete made
+  // because "the member isn't on this device yet" must never propagate to the
+  // shared DB and wipe valid records on every other device.
+  var _localOnly = false;
   function notifySyncIfAvailable(storeName, record, opType) {
+    if (_localOnly) return;
     if (typeof SyncEngine !== 'undefined' && SyncEngine.notifyChange) {
       try { SyncEngine.notifyChange(storeName, record, opType); } catch (e) {}
     }
@@ -292,10 +297,17 @@ const DB = (function () {
   async function saveAttendance(memberId, date, status) {
     var existing = await getAttendanceByMemberDate(memberId, date);
     if (existing) {
+      // Unchanged → no write, so a blanket Save doesn't bump versions or
+      // overwrite another device's newer value for this member+date.
+      if (existing.status === status) return existing.id;
       existing.status = status;
       return updateAttendance(existing);
     } else {
-      var record = { id: generateId(), memberId: memberId, date: date, status: status };
+      // No row means "not present"; don't create 'absent' rows nobody asked for.
+      if (status === 'absent') return null;
+      // Deterministic id: two devices marking the same member+date converge on
+      // ONE document instead of colliding on the unique memberDate index.
+      var record = { id: memberId + '_' + date, memberId: memberId, date: date, status: status };
       return addAttendance(record);
     }
   }
@@ -332,6 +344,10 @@ const DB = (function () {
   async function cleanupOrphans() {
     try {
       var members = await getAllMembers();
+      // No members at all = this device simply hasn't received them. Never treat
+      // every child record as an orphan in that state.
+      if (!members.length) return 0;
+      _localOnly = true;
       var valid = {};
       members.forEach(function (m) { if (m && m.id) valid[m.id] = true; });
 
@@ -361,6 +377,8 @@ const DB = (function () {
     } catch (e) {
       console.error('DB: cleanupOrphans error', e);
       return 0;
+    } finally {
+      _localOnly = false;
     }
   }
 
@@ -379,6 +397,7 @@ const DB = (function () {
   // Keeps only the latest record (by createdAt) per member+date.
   async function deduplicateFeeRecords() {
     try {
+      _localOnly = true;
       var allRecords = await getAllMonthlyFeeRecords();
       // Group by memberId+date
       var groups = {};
@@ -402,6 +421,8 @@ const DB = (function () {
       if (deleted > 0) console.log('DB: Deduplicated ' + deleted + ' duplicate fee record(s).');
     } catch (e) {
       console.error('DB: deduplicateFeeRecords error', e);
+    } finally {
+      _localOnly = false;
     }
   }
 

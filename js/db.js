@@ -114,12 +114,26 @@ const DB = (function () {
   }
 
   // ─── Sync notification hook ───
-  // Housekeeping (orphan/duplicate cleanup) must be LOCAL-ONLY: a delete made
+  // Writes that must NOT be queued for upload — records applied FROM the server
+  // by the sync engine, and local-only housekeeping deletes (a delete made
   // because "the member isn't on this device yet" must never propagate to the
-  // shared DB and wipe valid records on every other device.
-  var _localOnly = false;
+  // shared DB). This is decided PER RECORD (not by a global on/off switch), so a
+  // user's own save that happens while a sync is running is always queued and
+  // stamped.
+  var _noSync = new WeakSet();      // record objects (put)
+  var _noSyncDel = {};              // 'store|id' → true (delete)
+  function markNoSync(record) { if (record && typeof record === 'object') _noSync.add(record); return record; }
+  function markNoSyncDelete(storeName, id) { _noSyncDel[storeName + '|' + id] = true; }
+  function clearNoSyncDelete(storeName, id) { delete _noSyncDel[storeName + '|' + id]; }
+  // Convenience: delete a record locally without notifying sync.
+  async function deleteLocalOnly(storeName, deleteFn, id) {
+    markNoSyncDelete(storeName, id);
+    try { return await deleteFn(id); } finally { clearNoSyncDelete(storeName, id); }
+  }
+
   function notifySyncIfAvailable(storeName, record, opType) {
-    if (_localOnly) return;
+    if (opType === 'delete') { if (record && _noSyncDel[storeName + '|' + record.id]) return; }
+    else if (record && _noSync.has(record)) return;
     if (typeof SyncEngine !== 'undefined' && SyncEngine.notifyChange) {
       try { SyncEngine.notifyChange(storeName, record, opType); } catch (e) {}
     }
@@ -132,9 +146,7 @@ const DB = (function () {
   //
   // When the sync engine writes records it pulled from the server, it must NOT
   // re-stamp them (that would bump the version and corrupt the authoritative
-  // remote value). The sync engine toggles _suppressStamp around those writes.
-  var _suppressStamp = false;
-  function setSuppressStamp(on) { _suppressStamp = !!on; }
+  // remote value). The sync engine marks those records with markNoSync().
 
   // Optimistic concurrency token:
   //   _baseUpdatedAt = the server `updatedAt` this record was last synced from.
@@ -143,8 +155,8 @@ const DB = (function () {
   // remote changed underneath us since then. A brand-new local record has no
   // _baseUpdatedAt (it's a create, cannot conflict).
   function stampRecord(record) {
-    if (_suppressStamp) return record;
     if (!record || typeof record !== 'object') return record;
+    if (_noSync.has(record)) return record;
     // Capture the pre-edit value as the base the first time we edit a record
     // that already had a server-synced updatedAt and no base recorded yet.
     if (record._baseUpdatedAt === undefined && typeof record.updatedAt === 'number') {
@@ -347,29 +359,28 @@ const DB = (function () {
       // No members at all = this device simply hasn't received them. Never treat
       // every child record as an orphan in that state.
       if (!members.length) return 0;
-      _localOnly = true;
       var valid = {};
       members.forEach(function (m) { if (m && m.id) valid[m.id] = true; });
 
       var removed = 0;
-      async function sweep(getAll, del) {
+      async function sweep(storeName, getAll, del) {
         var all = await getAll();
         for (var i = 0; i < all.length; i++) {
           var r = all[i];
           if (r && r.memberId && !valid[r.memberId]) {
-            try { await del(r.id); removed++; } catch (e) {}
+            try { await deleteLocalOnly(storeName, del, r.id); removed++; } catch (e) {}
           }
         }
       }
-      await sweep(getAllPayments,           deletePayment);
-      await sweep(getAllGuestSessions,      deleteGuestSession);
-      await sweep(getAllMonthlyFeeRecords,  deleteMonthlyFeeRecord);
-      await sweep(getAllAttendance,         deleteAttendance);
+      await sweep('payments',            getAllPayments,           deletePayment);
+      await sweep('guest_sessions',      getAllGuestSessions,      deleteGuestSession);
+      await sweep('monthly_fee_records', getAllMonthlyFeeRecords,  deleteMonthlyFeeRecord);
+      await sweep('attendance',          getAllAttendance,         deleteAttendance);
       // Contributions are keyed per member too.
       var contribs = await getAllContributions();
       for (var j = 0; j < contribs.length; j++) {
         if (contribs[j] && contribs[j].memberId && !valid[contribs[j].memberId]) {
-          try { await deleteContribution(contribs[j].id); removed++; } catch (e) {}
+          try { await deleteLocalOnly('contributions', deleteContribution, contribs[j].id); removed++; } catch (e) {}
         }
       }
       if (removed > 0) console.log('DB: cleaned up ' + removed + ' orphaned record(s).');
@@ -377,8 +388,6 @@ const DB = (function () {
     } catch (e) {
       console.error('DB: cleanupOrphans error', e);
       return 0;
-    } finally {
-      _localOnly = false;
     }
   }
 
@@ -397,7 +406,6 @@ const DB = (function () {
   // Keeps only the latest record (by createdAt) per member+date.
   async function deduplicateFeeRecords() {
     try {
-      _localOnly = true;
       var allRecords = await getAllMonthlyFeeRecords();
       // Group by memberId+date
       var groups = {};
@@ -414,20 +422,18 @@ const DB = (function () {
         // Sort by createdAt desc — keep first (latest)
         recs.sort(function (a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); });
         for (var i = 1; i < recs.length; i++) {
-          await deleteMonthlyFeeRecord(recs[i].id);
+          await deleteLocalOnly('monthly_fee_records', deleteMonthlyFeeRecord, recs[i].id);
           deleted++;
         }
       }
       if (deleted > 0) console.log('DB: Deduplicated ' + deleted + ' duplicate fee record(s).');
     } catch (e) {
       console.error('DB: deduplicateFeeRecords error', e);
-    } finally {
-      _localOnly = false;
     }
   }
 
   return {
-    init, generateId, setSuppressStamp, markSynced,
+    init, generateId, markSynced, markNoSync, deleteLocalOnly,
     addMember, getMember, getAllMembers, updateMember, deleteMember,
     addContribution, getContribution, getAllContributions, updateContribution,
     deleteContribution, getContributionByMember,

@@ -32,8 +32,7 @@ const SyncEngine = (function () {
     audit: { getAll: 'getAllAuditRecords', update: 'updateAuditRecord', delete: 'deleteAuditRecord', get: 'getAudit' }
   };
 
-  var _suppressNotify = false;
-  var _applied = 0;     // records written into the local DB by the current sync (drives UI refresh)
+  var _applied = 0;    // records written into the local DB by the current sync (drives UI refresh)
   var _silent = false;  // true while a background (auto) sync runs — keeps the activity log quiet
 
   function generateUUID() {
@@ -203,7 +202,6 @@ const SyncEngine = (function () {
   // Changes are always identified by their stable record `id` (docId), never by
   // array position. Dedup keeps a single pending op per store+doc.
   function notifyChange(storeName, record, opType) {
-    if (_suppressNotify) return;
     if (SYNCED_STORES.indexOf(storeName) === -1) return;
     if (!record || !record.id) return;
 
@@ -348,8 +346,15 @@ const SyncEngine = (function () {
         res = await _pushBatch(batch, metaRef, changesRef);
       } catch (err) {
         if (err && err.code === 'permission-denied') {
-          // Rules blocked write — drop so we don't loop forever.
-          batch.forEach(removeFromQueue);
+          // Firestore rules blocked the write. NEVER drop the changes: they stay
+          // queued (and are retried) so they upload once the rules/config are
+          // fixed. Make it visible instead of failing silently — but at most once
+          // every 10 minutes, since the background sync retries regularly.
+          remainingCount += batch.length;
+          if (Date.now() - _lastPermLog > 600000) {
+            _lastPermLog = Date.now();
+            slog('err', 'Upload blocked by Firestore rules (permission-denied) — ' + queue.length + ' change(s) kept and will retry. Check security rules / config.');
+          }
           continue;
         }
         // Network / contention failure: keep this and the rest queued for the next sync.
@@ -385,7 +390,8 @@ const SyncEngine = (function () {
     if (remainingCount > 0) console.log('[SYNC] Push incomplete,', remainingCount, 'items remaining');
   }
 
-  var PUSH_BATCH = 100;   // 2 writes per change + 1 meta write << Firestore's 500-op limit
+  var _lastPermLog = 0;
+  var PUSH_BATCH = 100;  // 2 writes per change + 1 meta write << Firestore's 500-op limit
 
   async function _pushBatch(batch, metaRef, changesRef) {
     return firestoreDb.runTransaction(async function (tx) {
@@ -444,22 +450,17 @@ const SyncEngine = (function () {
   async function _writeBackLocalBase(storeName, data) {
     var methods = STORE_METHOD_MAP[storeName];
     if (!methods || !methods.get || !methods.update) return;
-    var _prevSuppress = _suppressNotify;
-    _suppressNotify = true;
-    DB.setSuppressStamp(true);
     try {
       var local = await DB[methods.get](data.id);
       if (local && typeof data.updatedAt === 'number') {
         // Only write back if the local record hasn't been edited again since.
         if (local.updatedAt === data.updatedAt) {
           local._baseUpdatedAt = data.updatedAt;
+          DB.markNoSync(local);   // this record only — user saves elsewhere stay queued
           await DB[methods.update](local);
         }
       }
-    } catch (e) {} finally {
-      DB.setSuppressStamp(false);
-      _suppressNotify = _prevSuppress;
-    }
+    } catch (e) {}
   }
 
   // Build a short, human summary of the LOST local edit for the activity log:
@@ -500,25 +501,20 @@ const SyncEngine = (function () {
     } catch (e) {}
 
     // 2. Overwrite local with remote (take-theirs) and re-baseline, suppressed.
-    var _prevSuppress = _suppressNotify;
-    _suppressNotify = true;
-    DB.setSuppressStamp(true);
     try {
       if (remoteData && (remoteData.id || docId)) {
         var remote = Object.assign({}, remoteData);
         if (!remote.id) remote.id = docId;
         DB.markSynced(remote);
+        DB.markNoSync(remote);
         await DB[methods.update](remote);
         _applied++;
       } else {
         // Remote has no usable body — delete the stale local record so it stops
         // conflicting (its edit is already preserved in the activity log).
-        try { await DB[methods.delete](docId); } catch (e) {}
+        try { await DB.deleteLocalOnly(storeName, DB[methods.delete], docId); } catch (e) {}
       }
-    } catch (e) {} finally {
-      DB.setSuppressStamp(false);
-      _suppressNotify = _prevSuppress;
-    }
+    } catch (e) {}
   }
 
   // ─── Read remote meta ───
@@ -559,13 +555,13 @@ const SyncEngine = (function () {
     if (!methods) return;
 
     if (op === 'delete') {
-      try { await DB[methods.delete](docId); _applied++; } catch (e) {}
+      try { await DB.deleteLocalOnly(storeName, DB[methods.delete], docId); _applied++; } catch (e) {}
       return;
     }
 
     if (!snap || !snap.exists) {
       // Envelope says put but doc is gone — treat as delete for convergence.
-      try { await DB[methods.delete](docId); _applied++; } catch (e) {}
+      try { await DB.deleteLocalOnly(storeName, DB[methods.delete], docId); _applied++; } catch (e) {}
       return;
     }
     var remote = snap.data();
@@ -595,10 +591,11 @@ const SyncEngine = (function () {
         var rTs = (typeof remote.updatedAt === 'number') ? remote.updatedAt : 0;
         var remoteWins = rTs > tTs || (rTs === tTs && String(remote.id) > String(twin.id));
         if (!remoteWins) return false;
-        await DB[methods.delete](twin.id);   // loser; notify is suppressed by caller
+        await DB.deleteLocalOnly(storeName, DB[methods.delete], twin.id);   // loser: local only
       }
     }
     DB.markSynced(remote);
+    DB.markNoSync(remote);   // applied FROM the server: never re-stamp or re-queue it
     await DB[methods.update](remote);
     _applied++;
     return true;
@@ -658,8 +655,6 @@ const SyncEngine = (function () {
     var todo = Object.keys(last).map(function (k) { return last[k]; })
       .sort(function (a, b) { return a.rev - b.rev; });
 
-    _suppressNotify = true;
-    DB.setSuppressStamp(true);
     try {
       // Fetch every changed doc with bounded parallelism (deletes need no read).
       var fetched = new Array(todo.length);
@@ -687,9 +682,9 @@ const SyncEngine = (function () {
       }
       setLocalCursor(remoteMeta.generation, remoteMeta.revision);
       return true;
-    } finally {
-      _suppressNotify = false;
-      DB.setSuppressStamp(false);
+    } catch (e) {
+      console.error('[SYNC] incremental pull failed', e);
+      return false;
     }
   }
 
@@ -707,8 +702,6 @@ const SyncEngine = (function () {
 
     console.log('[SYNC] Full merge (regular merge / authoritative reconciliation)');
     var mergeFailed = 0;   // records that could not be stored — caller must not adopt the head cursor
-    _suppressNotify = true;
-    DB.setSuppressStamp(true);
 
     try {
       for (var i = 0; i < SYNCED_STORES.length; i++) {
@@ -757,7 +750,9 @@ const SyncEngine = (function () {
           var localDirty = (lBase === undefined) ? (lTs > 0 && rTs === 0) : (lTs !== lBase);
 
           if (!localDirty) {
-            // Local has no un-pushed edit → accept the remote value.
+            // Local has no un-pushed edit → accept the remote value. (Re-check the
+            // live queue: the user may have saved this record since our snapshot.)
+            if (isQueued(storeName, remoteId)) continue;
             if (rTs !== lTs) { try { await putRemoteRecord(storeName, remote); } catch (e) { mergeFailed++; slog('err', 'Merge: could not update ' + storeName + ' ' + String(remoteId).slice(0, 8) + ' — ' + (e && e.message)); } }
             continue;
           }
@@ -772,16 +767,11 @@ const SyncEngine = (function () {
           // Both the local record and the remote changed independently → CONFLICT.
           // TAKE THEIRS: log the lost local edit to the activity log, then
           // overwrite local with remote and re-baseline so it is no longer
-          // dirty (self-heals — no repeated conflict). Writes here are already
-          // inside the _suppressNotify + setSuppressStamp(true) block of fullMerge.
-          // Write the CF audit with notify un-suppressed so the audit record
-          // itself queues for sync (append-only), then restore suppression for
-          // the take-theirs overwrite below.
+          // dirty (self-heals — no repeated conflict). The CF audit record is a
+          // normal write, so it queues for sync (append-only).
           try {
             if (typeof Audit !== 'undefined' && Audit.writeAudit) {
-              var _fmSuppress = _suppressNotify; _suppressNotify = false;
               Audit.writeAudit('CF', { store: storeName, id: String(remoteId).slice(0, 8), detail: _lostEditDetail(localRec, remote) });
-              _suppressNotify = _fmSuppress;
             }
           } catch (e) {}
           try { await putRemoteRecord(storeName, remote); } catch (e) { mergeFailed++; slog('err', 'Merge: could not apply ' + storeName + ' ' + String(remoteId).slice(0, 8) + ' — ' + (e && e.message)); }
@@ -791,9 +781,6 @@ const SyncEngine = (function () {
     } catch (e) {
       console.error('[SYNC] Full merge failed:', e);
       throw e;
-    } finally {
-      _suppressNotify = false;
-      DB.setSuppressStamp(false);
     }
     return mergeFailed;
   }
@@ -849,7 +836,7 @@ const SyncEngine = (function () {
   // Local-only housekeeping (orphan / duplicate cleanup). Runs ONLY after a sync
   // that fully reconciled and left nothing queued, i.e. when "this member isn't
   // on this device" really does mean "this member no longer exists". These
-  // deletes are never pushed (see DB._localOnly).
+  // deletes are never pushed (see DB.deleteLocalOnly).
   async function _housekeeping() {
     try {
       if (getQueue().length > 0) return;

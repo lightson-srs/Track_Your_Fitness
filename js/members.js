@@ -250,12 +250,16 @@ const Members = (function () {
       if (editingMemberId) {
         var existing = await DB.getMember(editingMemberId);
         if (existing) {
-          member.createdAt = existing.createdAt;
-          member.status = existing.status;
+          // Start from the STORED record so id/status/createdAt AND the sync
+          // fields (updatedAt/version/_baseUpdatedAt) survive; apply only the
+          // fields this form edits.
+          var edits = { name: member.name, mobile: member.mobile, notes: member.notes,
+                        memberType: member.memberType, validTill: member.validTill, photo: member.photo };
           // Preserve existing photo if no new one was captured
-          if (!member.photo && existing.photo) member.photo = existing.photo;
+          if (!edits.photo && existing.photo) edits.photo = existing.photo;
           // Preserve validTill if not explicitly set in form
-          if (!member.validTill && existing.validTill) member.validTill = existing.validTill;
+          if (!edits.validTill && existing.validTill) edits.validTill = existing.validTill;
+          member = DB.mergeEdit(existing, edits);
         }
         await DB.updateMember(member);
         if (typeof Audit !== 'undefined') Audit.writeAudit('MU', { name: member.name });

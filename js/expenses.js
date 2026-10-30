@@ -146,7 +146,11 @@ const Expenses = (function () {
       var _wasEdit = !!editingExpenseId;
       if (editingExpenseId) {
         var existing = await DB.getExpense(editingExpenseId);
-        if (existing) expense.createdAt = existing.createdAt;
+        if (existing) {
+          // Edit the STORED record so the sync fields (updatedAt/version/_baseUpdatedAt) survive.
+          expense = DB.mergeEdit(existing, { amount: expense.amount, date: expense.date,
+            category: expense.category, notes: expense.notes });
+        }
         await DB.updateExpense(expense);
       } else {
         await DB.addExpense(expense);

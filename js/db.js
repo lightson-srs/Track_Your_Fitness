@@ -180,6 +180,19 @@ const DB = (function () {
   function addMember(m)    { stampRecord(m); return reqToPromise(getStore('members','readwrite').add(m)).then(function(r) { notifySyncIfAvailable('members', m, 'put'); return r; }); }
   function getMember(id)   { return reqToPromise(getStore('members','readonly').get(id)); }
   function getAllMembers()  { return reqToPromise(getStore('members','readonly').getAll()); }
+  // `name` is a unique index, so at most one member matches.
+  function getMemberByName(name) { return reqToPromise(getStore('members','readonly').index('name').get(name)).then(function (r) { return r || null; }); }
+
+  // Build an edited record from the STORED one plus the changed fields, so the
+  // sync bookkeeping (updatedAt/version/_baseUpdatedAt, which drive conflict
+  // detection) and any fields the form doesn't know about are preserved. Saving a
+  // brand-new object built from a form would drop them and make the next upload
+  // silently overwrite another device's edit. `undefined` edits are ignored.
+  function mergeEdit(existing, edits) {
+    var out = Object.assign({}, existing);
+    Object.keys(edits || {}).forEach(function (k) { if (edits[k] !== undefined) out[k] = edits[k]; });
+    return out;
+  }
   function updateMember(m) { stampRecord(m); return reqToPromise(getStore('members','readwrite').put(m)).then(function(r) { notifySyncIfAvailable('members', m, 'put'); return r; }); }
   function deleteMember(id){ return reqToPromise(getStore('members','readwrite').delete(id)).then(function(r) { notifySyncIfAvailable('members', {id:id}, 'delete'); return r; }); }
 
@@ -433,7 +446,7 @@ const DB = (function () {
   }
 
   return {
-    init, generateId, markSynced, markNoSync, deleteLocalOnly,
+    init, generateId, markSynced, markNoSync, deleteLocalOnly, mergeEdit, getMemberByName,
     addMember, getMember, getAllMembers, updateMember, deleteMember,
     addContribution, getContribution, getAllContributions, updateContribution,
     deleteContribution, getContributionByMember,

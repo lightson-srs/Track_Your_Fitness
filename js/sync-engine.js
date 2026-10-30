@@ -573,6 +573,16 @@ const SyncEngine = (function () {
     await putRemoteRecord(storeName, remote);
   }
 
+  // First "Name (n)" that no member uses yet.
+  async function _freeMemberName(name) {
+    var base = String(name).replace(/ \(\d+\)$/, '');
+    for (var n = 2; n < 100; n++) {
+      var candidate = base + ' (' + n + ')';
+      if (!(await DB.getMemberByName(candidate))) return candidate;
+    }
+    return base + ' (' + Date.now() + ')';
+  }
+
   // Write a record that came FROM the server (stamping already suppressed by the
   // caller). Marks it synced. Attendance has a unique member+date index, so two
   // devices that created rows for the same member+date with different ids are
@@ -581,12 +591,40 @@ const SyncEngine = (function () {
   // winner. Returns true if the remote record was stored.
   async function putRemoteRecord(storeName, remote) {
     var methods = STORE_METHOD_MAP[storeName];
-    // Both stores have a unique member+date index (see db.js).
-    var twinLookup = storeName === 'attendance' ? DB.getAttendanceByMemberDate
-                   : storeName === 'monthly_fee_records' ? DB.getMonthlyFeeRecordByMemberDate : null;
-    if (twinLookup && remote.memberId && remote.date) {
-      var twin = await twinLookup(remote.memberId, remote.date);
+
+    // Member names are unique, but two devices can each add the same name with
+    // different ids. Neither can be dropped (payments/attendance point at the
+    // member's id), so keep BOTH: deterministically (larger id) the later one is
+    // stored here as "Name (2)" and flagged for you to rename or merge by hand.
+    if (storeName === 'members' && remote.name) {
+      var nameTwin = await DB.getMemberByName(remote.name);
+      if (nameTwin && nameTwin.id !== remote.id) {
+        if (String(remote.id) > String(nameTwin.id)) {
+          remote = Object.assign({}, remote, { name: await _freeMemberName(remote.name) });
+          flagConflict('members', remote.id, 'Another device added a member with the same name — kept here as "' + remote.name + '". Rename or delete one.');
+        } else {
+          var renamed = Object.assign({}, nameTwin, { name: await _freeMemberName(nameTwin.name) });
+          DB.markNoSync(renamed);   // local display fix only; do not upload it
+          await DB.updateMember(renamed);
+          flagConflict('members', nameTwin.id, 'Another device added a member with the same name — kept here as "' + renamed.name + '". Rename or delete one.');
+        }
+      }
+    }
+
+    // These stores have a unique key beyond `id`: attendance & fee records by
+    // member+date, an enrolment by member. Two devices that created one for the
+    // same key with different ids are reconciled deterministically instead of
+    // failing with ConstraintError: newer updatedAt wins (tie → larger id), so every
+    // device picks the same winner. A local copy still waiting to upload is never
+    // evicted — it uploads next and wins everywhere by being newest.
+    var twinLookup = null, twinArgs = null;
+    if (storeName === 'attendance' && remote.memberId && remote.date) { twinLookup = DB.getAttendanceByMemberDate; twinArgs = [remote.memberId, remote.date]; }
+    else if (storeName === 'monthly_fee_records' && remote.memberId && remote.date) { twinLookup = DB.getMonthlyFeeRecordByMemberDate; twinArgs = [remote.memberId, remote.date]; }
+    else if (storeName === 'contributions' && remote.memberId) { twinLookup = DB.getContributionByMember; twinArgs = [remote.memberId]; }
+    if (twinLookup) {
+      var twin = await twinLookup.apply(null, twinArgs);
       if (twin && twin.id !== remote.id) {
+        if (isQueued(storeName, twin.id)) return false;
         var tTs = (typeof twin.updatedAt === 'number') ? twin.updatedAt : 0;
         var rTs = (typeof remote.updatedAt === 'number') ? remote.updatedAt : 0;
         var remoteWins = rTs > tTs || (rTs === tTs && String(remote.id) > String(twin.id));

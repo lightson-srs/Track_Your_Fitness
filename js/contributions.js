@@ -386,7 +386,12 @@ const Contributions = (function () {
       var _wasEdit = !!_enrollContribId;
       if (_enrollContribId) {
         var existing = await DB.getContribution(_enrollContribId);
-        if (existing) contrib.createdAt = existing.createdAt;
+        if (existing) {
+          // Edit the STORED record: keeps id/memberId/status/createdAt and the sync
+          // fields (updatedAt/version/_baseUpdatedAt); only the form's fields change.
+          contrib = DB.mergeEdit(existing, { monthlyFee: contrib.monthlyFee, guestFee: contrib.guestFee,
+            activationDate: contrib.activationDate, dueDay: contrib.dueDay, notes: contrib.notes });
+        }
         await DB.updateContribution(contrib);
       } else {
         await DB.addContribution(contrib);

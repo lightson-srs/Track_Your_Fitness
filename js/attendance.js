@@ -11,13 +11,23 @@ const Attendance = (function () {
   // of reloading from the DB. Keyed by date so changing the date clears it.
   var _attDraft = {};
   var _attDraftDate = null;
+  // What the DB held for the current date at the last render { memberId: status }.
+  var _attBaseline = {};
 
   // Snapshot the live checkbox states from the DOM into _attDraft, so a
   // subsequent renderAttendance() can re-apply them (tab switch, search, etc.).
+  // ONLY boxes that differ from the last-rendered DB state are real unsaved
+  // edits. Recording untouched boxes would freeze a stale view: e.g. a render
+  // that ran before a sync arrived would store "absent" for everyone and then
+  // keep overriding the freshly synced "present" rows on every later redraw.
   function captureDraft() {
     var boxes = document.querySelectorAll('.att-checkbox');
     boxes.forEach(function (cb) {
-      if (cb.dataset.memberId) _attDraft[cb.dataset.memberId] = cb.checked ? 'present' : 'absent';
+      var id = cb.dataset.memberId;
+      if (!id) return;
+      var wasPresent = _attBaseline[id] === 'present';
+      if (cb.checked !== wasPresent) _attDraft[id] = cb.checked ? 'present' : 'absent';
+      else delete _attDraft[id];   // matches the DB again → not an edit
     });
   }
 
@@ -147,7 +157,7 @@ const Attendance = (function () {
 
     // Preserve unsaved toggles across re-renders (tab switch / search). If the
     // date changed, the draft belongs to a different day — discard it.
-    if (_attDraftDate !== date) { _attDraft = {}; _attDraftDate = date; }
+    if (_attDraftDate !== date) { _attDraft = {}; _attBaseline = {}; _attDraftDate = date; }
     else { captureDraft(); }
 
     container.innerHTML = '<p class="empty-message">Loading…</p>';
@@ -177,6 +187,7 @@ const Attendance = (function () {
       var attendanceRecords = await DB.getAttendanceByDate(date);
       var attMap = {};
       attendanceRecords.forEach(function (r) { attMap[r.memberId] = r.status; });
+      _attBaseline = Object.assign({}, attMap);   // saved state, before the unsaved-draft overlay
 
       // Overlay the unsaved draft so a toggle made on one tab is reflected on
       // the others (and in the All tab) until the user Saves or Cancels.

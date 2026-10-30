@@ -258,7 +258,7 @@ const SyncEngine = (function () {
     _bgStarted = true;
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible') {
-        if (Date.now() - _lastSyncAt > MIN_GAP && _online()) syncBackground().catch(function () {});
+        if (Date.now() - _lastSyncAt > MIN_GAP && _online()) syncBackground(true).catch(function () {});
       } else if (getQueue().length > 0 && _online()) {
         syncBackground().catch(function () {});   // best effort before iOS suspends us
       }
@@ -833,6 +833,64 @@ const SyncEngine = (function () {
     return true;
   }
 
+  // ─── Safety net: verify recently-changed records ───
+  // The cursor lives in localStorage while the data lives in IndexedDB, and the
+  // change stream only describes what happened AFTER the cursor. If the two ever
+  // disagree (cursor copied from another device, DB cleared/evicted, a failed or
+  // skipped apply…) a quick sync says "up to date" while records are missing, and
+  // only Full sync repairs it. So, on app load and on every manual refresh, ask
+  // Firestore for everything written in the last VERIFY_DAYS (one range query per
+  // store) and fix whatever this device lacks or holds a stale copy of. It logs
+  // what it repaired, which also shows when the incremental path had a gap.
+  var VERIFY_DAYS = 7;
+  var _verifiedThisLoad = false;
+  var _verifyRequested = false;
+
+  async function verifyRecent() {
+    if (!firestoreDb) return 0;
+    var cutoff = Date.now() - VERIFY_DAYS * 86400000;
+    var stores = SYNCED_STORES.filter(function (s) { return s !== 'audit'; });   // audit is a log, not state
+
+    var fetched;
+    try {
+      fetched = await Promise.all(stores.map(function (storeName) {
+        return getCollectionRef(storeName).where('updatedAt', '>=', cutoff).get()
+          .then(function (snap) { return { storeName: storeName, docs: snap.docs }; });
+      }));
+    } catch (e) {
+      console.error('[SYNC] verifyRecent read failed', e);
+      return 0;
+    }
+
+    var repaired = {}, total = 0;
+    for (var s = 0; s < fetched.length; s++) {
+      var storeName = fetched[s].storeName, methods = STORE_METHOD_MAP[storeName];
+      for (var d = 0; d < fetched[s].docs.length; d++) {
+        var doc = fetched[s].docs[d];
+        var remote = doc.data();
+        if (!remote) continue;
+        if (!remote.id) remote = Object.assign({ id: doc.id }, remote);
+        if (isQueued(storeName, doc.id)) continue;   // a local edit is waiting to push
+        try {
+          var localRec = await DB[methods.get](doc.id);
+          var rTs = (typeof remote.updatedAt === 'number') ? remote.updatedAt : 0;
+          var lTs = localRec && (typeof localRec.updatedAt === 'number') ? localRec.updatedAt : 0;
+          // Missing here, or our copy is older than the server's.
+          if (!localRec || rTs > lTs) {
+            if (await putRemoteRecord(storeName, remote)) { repaired[storeName] = (repaired[storeName] || 0) + 1; total++; }
+          }
+        } catch (e) {
+          slog('err', 'Verify: could not apply ' + storeName + ' ' + String(doc.id).slice(0, 8) + ' — ' + (e && e.message));
+        }
+      }
+    }
+    if (total > 0) {
+      slog('ok', 'Recent-record check repaired ' + total + ' record(s) the change stream had not delivered: ' +
+        Object.keys(repaired).map(function (k) { return k + '×' + repaired[k]; }).join(', '));
+    }
+    return total;
+  }
+
   // Local-only housekeeping (orphan / duplicate cleanup). Runs ONLY after a sync
   // that fully reconciled and left nothing queued, i.e. when "this member isn't
   // on this device" really does mean "this member no longer exists". These
@@ -867,8 +925,9 @@ const SyncEngine = (function () {
   // Background (auto) sync: same work, but quiet — it only asks the UI to redraw
   // when it actually changed local data, so it never disturbs what the user is doing.
   var _bgWaiting = null;
-  function syncBackground() {
+  function syncBackground(verify) {
     if (!_syncEnabled()) return Promise.resolve();
+    if (verify === true) _verifyRequested = true;
     if (_bgWaiting) return _bgWaiting;
     _bgWaiting = _exclusive(function () { _bgWaiting = null; return _syncOnce(true); });
     return _bgWaiting;
@@ -888,6 +947,12 @@ const SyncEngine = (function () {
       // jump to a freshly-read head here: revisions other devices pushed while we
       // were pulling would be skipped forever.
       var reconciled = await pull();
+      // Verify on app load, on every manual refresh, and when resuming from the
+      // background — not on the quiet periodic polls.
+      if (reconciled && (!silent || _verifyRequested || !_verifiedThisLoad)) {
+        _verifyRequested = false; _verifiedThisLoad = true;
+        await verifyRecent();
+      }
       if (reconciled) await _housekeeping();
       _lastSyncAt = Date.now();
       // Tell the UI once after sync, and how much local data actually changed.

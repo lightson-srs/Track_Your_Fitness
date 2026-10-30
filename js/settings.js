@@ -124,12 +124,20 @@ const Settings = (function () {
     if (meta) meta.setAttribute('content', _themeColors[theme] || '#1e1e1e');
   }
 
+  // Per-device sync state must NEVER travel in a backup. Restoring another
+  // device's cursor makes this device believe it is already up to date (so quick
+  // syncs fetch nothing), copying its device id makes the two devices skip each
+  // other's changes, and its queue would re-upload stale edits.
+  function isDeviceLocalKey(key) {
+    return key === 'tyf_device_id' || key.indexOf('tyf_sync_') === 0;
+  }
+
   function getAllSettings() {
     var result = {};
     try {
       for (var i = 0; i < localStorage.length; i++) {
         var key = localStorage.key(i);
-        if (key && key.startsWith('tyf_')) result[key] = localStorage.getItem(key);
+        if (key && key.startsWith('tyf_') && !isDeviceLocalKey(key)) result[key] = localStorage.getItem(key);
       }
     } catch (e) {}
     return result;
@@ -138,7 +146,7 @@ const Settings = (function () {
   function restoreSettings(obj) {
     if (!obj) return;
     for (var key in obj) {
-      if (obj.hasOwnProperty(key)) { try { localStorage.setItem(key, obj[key]); } catch (e) {} }
+      if (obj.hasOwnProperty(key) && !isDeviceLocalKey(key)) { try { localStorage.setItem(key, obj[key]); } catch (e) {} }
     }
   }
 

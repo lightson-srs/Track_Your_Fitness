@@ -83,32 +83,39 @@ const SyncEngine = (function () {
 
   // --- Firebase SDK Loading ---
 
+  // One load per URL, shared by every caller. (Before, a second caller that found
+  // the <script> tag still LOADING resolved immediately and then hit
+  // "firebase.firestore is not a function"; and a failed/timed-out tag stayed in
+  // the page, so every retry wrongly reported success.)
+  var _scriptLoads = {};
   function loadScript(src) {
-    return new Promise(function (resolve, reject) {
-      if (document.querySelector('script[src="' + src + '"]')) { resolve(); return; }
+    if (_scriptLoads[src]) return _scriptLoads[src];
+    if (document.querySelector('script[src="' + src + '"]')) return Promise.resolve();   // added by the page itself
+    var p = new Promise(function (resolve, reject) {
       var settled = false;
       var script = document.createElement('script');
       script.src = src;
-      // Guard: never leave the promise pending if the network stalls.
-      var to = setTimeout(function () {
+      function fail(msg) {
         if (settled) return;
         settled = true;
-        reject(new Error('Timed out loading: ' + src));
-      }, 15000);
+        clearTimeout(to);
+        delete _scriptLoads[src];                       // allow a clean retry
+        if (script.parentNode) script.parentNode.removeChild(script);
+        reject(new Error(msg + src));
+      }
+      // Guard: never leave the promise pending if the network stalls.
+      var to = setTimeout(function () { fail('Timed out loading: '); }, 15000);
       script.onload = function () {
         if (settled) return;
         settled = true;
         clearTimeout(to);
         resolve();
       };
-      script.onerror = function () {
-        if (settled) return;
-        settled = true;
-        clearTimeout(to);
-        reject(new Error('Failed to load: ' + src));
-      };
+      script.onerror = function () { fail('Failed to load: '); };
       document.head.appendChild(script);
     });
+    _scriptLoads[src] = p;
+    return p;
   }
 
   async function loadFirebaseSDK() {
@@ -234,10 +241,14 @@ const SyncEngine = (function () {
   //  • the app syncs when it comes back to the foreground / network returns,
   //  • and a light check (one tiny meta read) runs while the app is open.
   // No Firestore listeners are used (avoids the old feedback loops).
-  var AUTO_PUSH_DELAY = 4000;
+  // Upload starts ~0.6s after the LAST change (so a burst such as "Save Attendance"
+  // for 40 members goes up as one batch), but never later than 3s after the FIRST
+  // change of a burst, so continuous saving can't postpone it.
+  var AUTO_PUSH_DELAY = 600;
+  var AUTO_PUSH_MAX_WAIT = 3000;
   var POLL_INTERVAL = 45000;
   var MIN_GAP = 15000;
-  var _autoTimer = null, _pollTimer = null, _lastSyncAt = 0, _bgStarted = false;
+  var _autoTimer = null, _autoFirst = 0, _pollTimer = null, _lastSyncAt = 0, _bgStarted = false;
 
   function _syncEnabled() {
     return typeof FirestoreConfig !== 'undefined' && FirestoreConfig.isSyncEnabled() && FirestoreConfig.hasConfig();
@@ -246,11 +257,14 @@ const SyncEngine = (function () {
 
   function _scheduleAutoSync() {
     if (!_bgStarted || !_syncEnabled()) return;
+    var now = Date.now();
+    if (!_autoFirst) _autoFirst = now;
     if (_autoTimer) clearTimeout(_autoTimer);
+    var wait = Math.max(0, Math.min(AUTO_PUSH_DELAY, _autoFirst + AUTO_PUSH_MAX_WAIT - now));
     _autoTimer = setTimeout(function () {
-      _autoTimer = null;
+      _autoTimer = null; _autoFirst = 0;
       if (_online()) syncBackground().catch(function () {});
-    }, AUTO_PUSH_DELAY);
+    }, wait);
   }
 
   function _startBackground() {
@@ -363,6 +377,10 @@ const SyncEngine = (function () {
         break;
       }
 
+      // Remember which revisions are ours (accepted ones are contiguous), so a
+      // later pull doesn't re-read what we just uploaded.
+      if (res.accepted.length) addMyRevs(res.firstRev, res.lastRev);
+
       // Accepted writes — reflect the new base token in the local record so a
       // later edit measures against the value we just uploaded.
       for (var a = 0; a < res.accepted.length; a++) {
@@ -390,8 +408,30 @@ const SyncEngine = (function () {
     if (remainingCount > 0) console.log('[SYNC] Push incomplete,', remainingCount, 'items remaining');
   }
 
+  // Revision ranges this device allocated on push (persisted, device-local).
+  var MYREVS_KEY = 'tyf_sync_myrevs';
+  var _myRevs = null;
+  function _getMyRevs() {
+    if (_myRevs === null) {
+      try { _myRevs = JSON.parse(localStorage.getItem(MYREVS_KEY) || '[]'); } catch (e) { _myRevs = []; }
+      if (!Array.isArray(_myRevs)) _myRevs = [];
+    }
+    return _myRevs;
+  }
+  function addMyRevs(from, to) {
+    var r = _getMyRevs();
+    r.push([from, to]);
+    if (r.length > 200) r = _myRevs = r.slice(-200);
+    try { localStorage.setItem(MYREVS_KEY, JSON.stringify(r)); } catch (e) {}
+  }
+  function isMyRev(rev) {
+    var r = _getMyRevs();
+    for (var i = 0; i < r.length; i++) if (rev >= r[i][0] && rev <= r[i][1]) return true;
+    return false;
+  }
+
   var _lastPermLog = 0;
-  var PUSH_BATCH = 100;  // 2 writes per change + 1 meta write << Firestore's 500-op limit
+  var PUSH_BATCH = 100; // 2 writes per change + 1 meta write << Firestore's 500-op limit
 
   async function _pushBatch(batch, metaRef, changesRef) {
     return firestoreDb.runTransaction(async function (tx) {
@@ -408,6 +448,7 @@ const SyncEngine = (function () {
 
       var accepted = [], conflicts = [];
       var now = Date.now(), dev = getDeviceId();
+      var startRev = revision;
 
       batch.forEach(function (entry, i) {
         var remoteSnap = remoteSnaps[i];
@@ -441,7 +482,7 @@ const SyncEngine = (function () {
       });
 
       if (accepted.length) tx.set(metaRef, { generation: generation, revision: revision }, { merge: true });
-      return { accepted: accepted, conflicts: conflicts };
+      return { accepted: accepted, conflicts: conflicts, firstRev: startRev + 1, lastRev: revision };
     });
   }
 
@@ -522,16 +563,20 @@ const SyncEngine = (function () {
   async function readRemoteMeta() {
     var metaRef = getMetaDocRef();
     if (!metaRef) return null;
+    var snap;
     try {
-      var snap = await metaRef.get();
-      if (!snap.exists) return null;
-      var m = snap.data() || {};
-      if (typeof m.generation !== 'number' || typeof m.revision !== 'number') return null;
-      return { generation: m.generation, revision: m.revision };
+      snap = await metaRef.get();
     } catch (e) {
+      // A FAILED read is not "no version info": returning null here made the
+      // caller think the DB was empty/unversioned and fall into a full merge (or
+      // fail with no explanation). Let the error surface so it is reported.
       console.error('[SYNC] readRemoteMeta failed:', e);
-      return null;
+      throw e;
     }
+    if (!snap.exists) return null;                       // genuinely no meta doc yet
+    var m = snap.data() || {};
+    if (typeof m.generation !== 'number' || typeof m.revision !== 'number') return null;
+    return { generation: m.generation, revision: m.revision };
   }
 
   // ─── Apply a single remote doc by id ───
@@ -681,13 +726,16 @@ const SyncEngine = (function () {
       console.warn('[SYNC] change stream has', changes.length, 'of', expected, 'revisions → full reconciliation');
       return false;
     }
-    var myDev = getDeviceId();
     var last = {};   // store|docId → latest change (revision order)
     for (var i = 0; i < changes.length; i++) {
       var ch = changes[i];
       if (ch.rev !== local.revision + 1 + i || ch.generation !== remoteMeta.generation) return false;
-      // Our own pushed change is already applied locally — skip re-reading it.
-      if (ch.dev && ch.dev === myDev) continue;
+      // A revision THIS device allocated when it pushed is already applied
+      // locally — skip re-reading it. Identified by the revision numbers we
+      // recorded, NOT by the device id in the envelope: two devices can end up
+      // with the same id (e.g. after a restore), and trusting the id would make
+      // each one ignore the other's changes.
+      if (isMyRev(ch.rev)) continue;
       last[ch.store + '|' + ch.docId] = ch;
     }
     var todo = Object.keys(last).map(function (k) { return last[k]; })
@@ -740,6 +788,7 @@ const SyncEngine = (function () {
 
     console.log('[SYNC] Full merge (regular merge / authoritative reconciliation)');
     var mergeFailed = 0;   // records that could not be stored — caller must not adopt the head cursor
+    var neverSynced = 0;   // local-only, never-uploaded records queued for upload
 
     try {
       for (var i = 0; i < SYNCED_STORES.length; i++) {
@@ -815,12 +864,45 @@ const SyncEngine = (function () {
           try { await putRemoteRecord(storeName, remote); } catch (e) { mergeFailed++; slog('err', 'Merge: could not apply ' + storeName + ' ' + String(remoteId).slice(0, 8) + ' — ' + (e && e.message)); }
           flagConflict(storeName, remoteId, 'your change was overwritten by another device (saved to activity log)');
         }
+
+        // Records that exist ONLY here and were never uploaded (data from before
+        // sync existed, or changes whose queue entry was lost) are not in the
+        // queue, so nothing would ever push them. Queue them now. A record that
+        // WAS synced before carries _baseUpdatedAt; if it is missing remotely it
+        // was deleted elsewhere, so it is left alone (never resurrect deletions).
+        neverSynced += await _queueNeverSynced(storeName, methods, localRecords, remoteDocs);
       }
     } catch (e) {
       console.error('[SYNC] Full merge failed:', e);
       throw e;
     }
+    if (neverSynced > 0) slog('ok', 'Queued ' + neverSynced + ' local record(s) that were never uploaded');
     return mergeFailed;
+  }
+
+  async function _queueNeverSynced(storeName, methods, localRecords, remoteDocs) {
+    var queued = 0;
+    for (var i = 0; i < localRecords.length; i++) {
+      var rec = localRecords[i];
+      if (!rec || !rec.id || remoteDocs[rec.id] !== undefined) continue;   // exists remotely
+      if (typeof rec._baseUpdatedAt === 'number') continue;                // was synced → deleted elsewhere
+      if (isQueued(storeName, rec.id)) continue;                           // already going up
+      try {
+        // Give legacy records a timestamp locally so the post-upload bookkeeping
+        // (base token) matches and they are not re-queued by every full merge.
+        if (typeof rec.updatedAt !== 'number') {
+          rec.updatedAt = Date.now();
+          if (typeof rec.version !== 'number') rec.version = 1;
+          DB.markNoSync(rec);
+          await DB[methods.update](rec);
+        }
+        notifyChange(storeName, rec, 'put');
+        queued++;
+      } catch (e) {
+        slog('err', 'Could not queue ' + storeName + ' ' + String(rec.id).slice(0, 8) + ' for upload — ' + (e && e.message));
+      }
+    }
+    return queued;
   }
 
   // ─── Pull: choose incremental vs full merge based on version history ───
@@ -897,6 +979,7 @@ const SyncEngine = (function () {
       }));
     } catch (e) {
       console.error('[SYNC] verifyRecent read failed', e);
+      slog('err', 'Recent-record check could not read the DB — ' + ((e && e.message) ? e.message : 'unknown'));
       return 0;
     }
 
@@ -995,10 +1078,18 @@ const SyncEngine = (function () {
       _lastSyncAt = Date.now();
       // Tell the UI once after sync, and how much local data actually changed.
       document.dispatchEvent(new CustomEvent('tyf-sync-update', { detail: { changed: _applied, silent: !!silent } }));
+    } catch (e) {
+      // A sync that fails must say so. Before, the error only reached the browser
+      // console, so "sync completed" while nothing arrived was indistinguishable
+      // from "sync failed". Quiet background runs log at most once per 5 minutes.
+      var msg = (e && e.message) ? e.message : String(e);
+      if (!(silent && Date.now() - _lastErrLog < 300000)) { _lastErrLog = Date.now(); slog('err', 'Sync failed — ' + msg + ' (changes stay queued; will retry)'); }
+      throw e;
     } finally {
       _silent = false;
     }
   }
+  var _lastErrLog = 0;
 
   // --- Full sync: explicit, authoritative reconciliation from the DB ---
   // Triggered by the Settings "Full sync from DB" button. Unlike the lightweight
@@ -1019,6 +1110,7 @@ const SyncEngine = (function () {
       // Read the head BEFORE merging: changes pushed meanwhile get replayed next sync.
       var beforeMeta = await readRemoteMeta();
       var failed = await fullMerge();
+      await push();   // upload any never-synced local records the merge just queued
       if (failed > 0) {
         slog('err', 'Full sync: ' + failed + ' record(s) could not be stored — cursor not advanced');
         document.dispatchEvent(new CustomEvent('tyf-sync-update'));
@@ -1041,17 +1133,38 @@ const SyncEngine = (function () {
 
   // --- Connect to Firestore (no listeners) ---
 
-  async function connect() {
+  // Connect ONCE and reuse the same Firebase app + Firestore object for the whole
+  // session. Concurrent callers share one in-flight attempt; an already-connected
+  // engine with an unchanged config returns immediately without touching anything.
+  var _connecting = null;
+  var _connKey = null;
+
+  function _configKey(c) {
+    return [c.apiKey || '', c.projectId || '', c.appId || '', c.authDomain || ''].join('|');
+  }
+
+  function connect() {
+    if (_connecting) return _connecting;
+    _connecting = _connectOnce().then(function (r) { _connecting = null; return r; },
+                                     function (e) { _connecting = null; throw e; });
+    return _connecting;
+  }
+
+  async function _connectOnce() {
     if (typeof FirestoreConfig === 'undefined') { status = 'disabled'; return false; }
     if (!FirestoreConfig.isSyncEnabled() || !FirestoreConfig.hasConfig()) { status = 'disabled'; return false; }
 
     try {
       getDeviceId();
-      await loadFirebaseSDK();
-      if (!window.firebase) { status = 'disabled'; return false; }
-
       var config = FirestoreConfig.getConfig();
       if (!config) { status = 'disabled'; return false; }
+      var key = _configKey(config);
+
+      // Fast path: already connected with this exact config → reuse as is.
+      if (status === 'connected' && firestoreDb && firebaseApp && _connKey === key) return true;
+
+      await loadFirebaseSDK();
+      if (!window.firebase || !firebase.firestore) { status = 'disabled'; return false; }
 
       var firebaseConfig = {};
       if (config.apiKey) firebaseConfig.apiKey = config.apiKey;
@@ -1061,12 +1174,20 @@ const SyncEngine = (function () {
       if (config.messagingSenderId) firebaseConfig.messagingSenderId = config.messagingSenderId;
       if (config.appId) firebaseConfig.appId = config.appId;
 
-      if (!firebaseApp) {
-        if (firebase.apps && firebase.apps.length > 0) { firebaseApp = firebase.apps[0]; }
-        else { firebaseApp = firebase.initializeApp(firebaseConfig); }
+      // Reuse the DEFAULT app if one exists (not apps[0] — that could be the
+      // license-registry app, which would point sync at the wrong project). If the
+      // saved config changed since it was created, replace it; otherwise keep it.
+      var app = null;
+      try { app = firebase.app(); } catch (e) { app = null; }
+      if (app && _configKey(app.options || {}) !== key) {
+        try { await app.delete(); } catch (e) {}
+        app = null;
       }
+      if (!app) app = firebase.initializeApp(firebaseConfig);
 
-      firestoreDb = firebase.firestore();
+      firebaseApp = app;
+      firestoreDb = firebase.firestore(app);
+      _connKey = key;
       status = 'connected';
       return true;
     } catch (e) {
@@ -1153,6 +1274,7 @@ const SyncEngine = (function () {
   function disconnect() {
     firebaseApp = null;
     firestoreDb = null;
+    _connKey = null;
     status = 'disconnected';
   }
 

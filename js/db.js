@@ -12,7 +12,20 @@ const DB = (function () {
     });
   }
 
+  // Open the database ONCE and reuse that handle for the whole session. Callers
+  // that arrive while the first open is still in progress share it (previously a
+  // second overlapping init() would have opened a second connection).
+  var _opening = null;
   function init() {
+    if (db) return Promise.resolve(db);
+    if (!_opening) {
+      _opening = _open().then(function (d) { _opening = null; return d; },
+                              function (e) { _opening = null; throw e; });
+    }
+    return _opening;
+  }
+
+  function _open() {
     return new Promise((resolve, reject) => {
       if (db) { resolve(db); return; }
       const request = indexedDB.open(DB_NAME, DB_VERSION);

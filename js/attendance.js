@@ -53,7 +53,15 @@ const Attendance = (function () {
     if (includeInactiveCb) includeInactiveCb.addEventListener('change', renderAttendance);
     if (selectAllCb) selectAllCb.addEventListener('change', function () { toggleSelectAll(selectAllCb.checked); });
     if (copyYesterday) copyYesterday.addEventListener('click', showCopyDateModal);
-    if (scanQrBtn) scanQrBtn.addEventListener('click', toggleQRScanner);
+    if (scanQrBtn) scanQrBtn.addEventListener('click', openScanner);
+    // Scanner modal: explicit Close button (no tap-outside-to-close, so a stray tap
+    // can't interrupt a scanning session). The camera is also released when the app
+    // is backgrounded/closed and on Escape.
+    var scanCloseBtn = document.getElementById('att-scan-close-btn');
+    if (scanCloseBtn) scanCloseBtn.addEventListener('click', closeScanner);
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeScanner(); });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') closeScanner(); });
+    window.addEventListener('pagehide', closeScanner);
     if (saveBtn) saveBtn.addEventListener('click', handleSaveAttendance);
     var cancelBtn = document.getElementById('att-cancel-btn');
     if (cancelBtn) cancelBtn.addEventListener('click', handleCancelAttendance);
@@ -320,16 +328,10 @@ const Attendance = (function () {
       var memberId = cb.dataset.memberId;
       var status = cb.checked ? 'present' : 'absent';
       try {
-        // Marking a deactivated member present reactivates them automatically.
-        if (status === 'present') {
-          var member = await DB.getMember(memberId);
-          if (member && member.status === 'inactive') {
-            member.status = 'active';
-            try { await DB.updateMember(member); reactivated++; }
-            catch (e) { console.error('Could not reactivate member', memberId, e); }
-          }
-        }
-        await DB.saveAttendance(memberId, date, status);
+        // Same routine as a QR scan: marking a deactivated member present
+        // reactivates them, then the record is saved.
+        var result = await recordAttendance(memberId, date, status);
+        if (result.reactivated) reactivated++;
         saved++;
       } catch (e) {
         errors++;
@@ -360,58 +362,116 @@ const Attendance = (function () {
     renderAttendance();
   }
 
-  // --- QR Scanner ---
-
-  function toggleQRScanner() {
-    var container = document.getElementById('att-qr-scanner-container');
-    if (!container) return;
-    if (_scannerInstance) { stopQRScanner(); }
-    else { startQRScanner(); }
+  // --- Shared "mark attendance" routine ---
+  // The Save Attendance button and a QR scan MUST follow the same routine, so both
+  // call this: marking someone PRESENT first reactivates a deactivated member, then
+  // the record is written through DB.saveAttendance (deterministic id, skips an
+  // unchanged row, queues the change for sync). Callers keep their own audit entry
+  // and messages. `preloaded` lets a caller that already fetched the member avoid
+  // a second read.
+  async function recordAttendance(memberId, date, status, preloaded) {
+    var member = null;
+    var reactivated = false;
+    if (status === 'present') {
+      member = preloaded || await DB.getMember(memberId);
+      if (member && member.status === 'inactive') {
+        member.status = 'active';
+        try { await DB.updateMember(member); reactivated = true; }
+        catch (e) { console.error('Could not reactivate member', memberId, e); }
+      }
+    }
+    await DB.saveAttendance(memberId, date, status);
+    return { member: member, reactivated: reactivated };
   }
 
-  async function startQRScanner() {
-    var container = document.getElementById('att-qr-scanner-container');
-    if (!container) return;
+  // --- QR Scanner (opens in a modal window) ---
 
-    container.removeAttribute('hidden');
-    container.innerHTML = '<p class="empty-message">Loading scanner…</p>';
+  var _scanToken = 0;   // bumps on every open/close, so a late async step can tell it is stale
+  var _scanCount = 0;   // members marked during the current scanner session
 
+  function setScanCount(n) {
+    var el = document.getElementById('att-scan-count');
+    if (el) el.textContent = String(n);
+  }
+
+  function setScanMessage(text) {
+    var el = document.getElementById('att-scan-modal-msg');
+    if (!el) return;
+    if (text) { el.textContent = text; el.removeAttribute('hidden'); }
+    else { el.textContent = ''; el.setAttribute('hidden', ''); }
+  }
+
+  function openScanner() {
+    var modal = document.getElementById('att-scan-modal');
+    if (!modal) return;
+    if (!modal.hasAttribute('hidden') && _scannerInstance) return;   // already open and running
+
+    _lastScanId = null; _lastScanAt = 0; _scanCount = 0;
+    var token = ++_scanToken;
+
+    // Scans mark the date chosen in the date picker, which the modal covers — so
+    // show that date in the modal.
+    var dateInput = document.getElementById('att-date');
+    var attDate = (dateInput && dateInput.value) ? dateInput.value : getTodayISO();
+    var dateEl = document.getElementById('att-scan-modal-date');
+    if (dateEl) dateEl.textContent = 'Marking present for ' + fmtDate(attDate);
+    setScanCount(0);
+    setScanMessage('');
+
+    modal.removeAttribute('hidden');   // must be visible BEFORE the camera starts (it needs a sized container)
+    startQRScanner(token);             // still inside the tap handler's call chain (iOS camera prompt)
+  }
+
+  async function startQRScanner(token) {
+    setScanMessage('Loading scanner…');
+    var inst = null;   // THIS attempt's camera — always released through this reference, never through whatever is current
     try {
-      if (!_html5QrcodeLoaded && typeof Html5Qrcode === 'undefined') {
+      if (typeof Html5Qrcode === 'undefined') {
         await loadScript('https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js');
-        _html5QrcodeLoaded = true;
       }
+      if (token !== _scanToken) return;               // closed while the library was loading
+      setScanMessage('');
 
-      container.innerHTML = '<div id="att-qr-reader" style="width:100%;max-width:400px;margin:0 auto;"></div>' +
-        '<button class="btn btn-secondary btn-sm" id="att-stop-scan-btn" style="margin-top:8px;width:100%;">Stop scanner</button>';
-
-      var stopBtn = document.getElementById('att-stop-scan-btn');
-      if (stopBtn) stopBtn.addEventListener('click', stopQRScanner);
-
-      _scannerInstance = new Html5Qrcode('att-qr-reader');
-      await _scannerInstance.start(
+      inst = new Html5Qrcode('att-qr-reader');
+      _scannerInstance = inst;
+      await inst.start(
         { facingMode: 'environment' },
-        { fps: 10, qrbox: { width: 250, height: 250 } },
+        { fps: 10, qrbox: function (w, h) { var s = Math.max(150, Math.min(250, Math.floor(Math.min(w, h) * 0.7))); return { width: s, height: s }; } },
         handleQRScanSuccess,
         function () {}
       );
+      // Closed while the camera was still starting: close could not stop it yet, so
+      // release it now that it is actually running.
+      if (token !== _scanToken) await releaseCamera(inst);
     } catch (e) {
+      await releaseCamera(inst);
+      if (token !== _scanToken) return;
       var msg = 'Could not start QR scanner.';
       if (e && e.message && e.message.toLowerCase().indexOf('permission') !== -1) {
         msg = 'Camera access is required for QR scanning.';
       } else if (e && e.message && e.message.indexOf('load') !== -1) {
         msg = 'QR scanner could not be loaded. Check your internet connection.';
       }
-      container.innerHTML = '<p class="empty-message">' + msg + '</p>' +
-        '<button class="btn btn-secondary btn-sm" onclick="document.getElementById(\'att-qr-scanner-container\').setAttribute(\'hidden\',\'\');" style="margin-top:8px;">Close</button>';
-      _scannerInstance = null;
+      setScanMessage(msg);
     }
+  }
+
+  // Close the modal AND release the camera. Safe to call any time (idempotent).
+  async function closeScanner() {
+    var modal = document.getElementById('att-scan-modal');
+    var isOpen = (modal && !modal.hasAttribute('hidden')) || !!_scannerInstance;
+    if (!isOpen) return;
+    _scanToken++;                                      // invalidates any start still in flight
+    if (modal) modal.setAttribute('hidden', '');
+    await stopQRScanner();
   }
 
   var _lastScanId = null;
   var _lastScanAt = 0;
 
   async function handleQRScanSuccess(decodedText) {
+    if (!_scannerInstance) return;   // scanner already closed — ignore late callbacks
+
     // Debounce duplicate reads: html5-qrcode fires the same code many times per second.
     var now = Date.now();
     if (decodedText === _lastScanId && (now - _lastScanAt) < 3000) { return; }
@@ -438,16 +498,13 @@ const Attendance = (function () {
       var dateInput = document.getElementById('att-date');
       var attDate = (dateInput && dateInput.value) ? dateInput.value : getTodayISO();
 
-      // Scanning a deactivated member reactivates them automatically.
-      var reactivated = false;
-      if (member.status === 'inactive') {
-        member.status = 'active';
-        try { await DB.updateMember(member); reactivated = true; }
-        catch (e) { console.error('Could not reactivate member on scan', member.id, e); }
-      }
-
-      await DB.saveAttendance(member.id, attDate, 'present');
+      // Same routine as the Save Attendance button (reactivate if needed, then save).
+      var result = await recordAttendance(member.id, attDate, 'present', member);
+      var reactivated = result.reactivated;
       if (typeof Audit !== 'undefined') Audit.writeAudit('AQ', { name: member.name, date: fmtDate(attDate) });
+
+      _scanCount++;
+      setScanCount(_scanCount);
 
       var dueText = '';
       if (typeof Monthly !== 'undefined' && typeof Monthly.calcMemberBalance === 'function') {
@@ -530,22 +587,38 @@ const Attendance = (function () {
     }, 1500);
   }
 
-  async function stopQRScanner() {
-    var container = document.getElementById('att-qr-scanner-container');
-    if (_scannerInstance) { try { await _scannerInstance.stop(); } catch (e) {} _scannerInstance = null; }
-    if (container) { container.setAttribute('hidden', ''); container.innerHTML = ''; }
+  // Release one specific camera. If it is still the current scanner it is
+  // un-registered FIRST so any late scan callback is ignored; a newer scanner
+  // (opened after this one) is never touched.
+  async function releaseCamera(inst) {
+    if (!inst) return;
+    if (_scannerInstance === inst) _scannerInstance = null;
+    try { await inst.stop(); } catch (e) {}
+    try { inst.clear(); } catch (e) {}
   }
 
+  function stopQRScanner() { return releaseCamera(_scannerInstance); }
+
+  // One load per URL, shared by every caller; a failed/timed-out tag is removed so a
+  // retry (e.g. after reconnecting) really tries again instead of reporting success.
+  var _scriptLoads = {};
   function loadScript(src) {
-    return new Promise(function (resolve, reject) {
-      if (document.querySelector('script[src="' + src + '"]')) { resolve(); return; }
+    if (_scriptLoads[src]) return _scriptLoads[src];
+    var p = new Promise(function (resolve, reject) {
       var script = document.createElement('script');
       script.src = src;
       script.onload = resolve;
-      script.onerror = function () { reject(new Error('Failed to load: ' + src)); };
+      script.onerror = function () {
+        delete _scriptLoads[src];
+        if (script.parentNode) script.parentNode.removeChild(script);
+        reject(new Error('Failed to load: ' + src));
+      };
       document.head.appendChild(script);
     });
+    _scriptLoads[src] = p;
+    return p;
   }
 
-  return { init: init, renderAttendance: renderAttendance };
+  return { init: init, renderAttendance: renderAttendance, openScanner: openScanner, closeScanner: closeScanner, recordAttendance: recordAttendance };
+
 })();

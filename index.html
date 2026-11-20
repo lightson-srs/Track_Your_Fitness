@@ -337,7 +337,6 @@
     <button class="btn btn-primary" id="att-save-btn" style="flex:2;">💾 Save Attendance</button>
   </div>
   <div class="success-msg" id="att-save-msg" hidden style="text-align:center;">Attendance saved!</div>
-  <div id="att-qr-scanner-container" hidden></div>
   <div id="att-scan-result" hidden></div>
 </main>
 
@@ -804,6 +803,18 @@
 <div id="id-card-overlay" class="id-card-overlay" hidden></div>
 
 <!-- ══ Copy Attendance Date Modal ═════════════════════ -->
+<div class="modal-overlay" id="att-scan-modal" hidden>
+  <div class="modal" style="max-width:420px;">
+    <div class="modal-title">📷 Scan member QR</div>
+    <div class="modal-subtitle" id="att-scan-modal-date">Marking present</div>
+    <div id="att-qr-reader" class="att-qr-reader"></div>
+    <p class="empty-message" id="att-scan-modal-msg" hidden></p>
+    <div class="modal-subtitle" style="margin:10px 0 0;text-align:center;">Scanned this session: <strong id="att-scan-count">0</strong></div>
+    <div class="form-actions" style="margin-top:12px;">
+      <button class="btn btn-secondary" id="att-scan-close-btn" style="width:100%;">Close scanner</button>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="att-copy-date-modal" hidden>
   <div class="modal" style="max-width:320px;">
     <div class="modal-title">Copy attendance from</div>

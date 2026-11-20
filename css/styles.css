@@ -373,7 +373,7 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 #settings-screen { overflow-y: auto; }
 /* Members and Expenses screens scroll naturally with the page */
 #attendance-screen { display: flex; flex-direction: column; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-#attendance-screen .section-header, #attendance-screen .filter-bar, #attendance-screen .bulk-select-all-row, #att-qr-scanner-container, #att-scan-result { flex-shrink: 0; }
+#attendance-screen .section-header, #attendance-screen .filter-bar, #attendance-screen .bulk-select-all-row, #att-scan-result { flex-shrink: 0; }
 #settings-screen .settings-section { flex-shrink: 0; }
 
 /* ── More popup menu ─────────────────────────────────── */
@@ -557,3 +557,7 @@ body { display: flex; flex-direction: column; max-width: 480px; margin: 0 auto; 
 .ar-events > div { padding: 3px 0; border-bottom: 1px solid var(--border); }
 .ar-events > div:last-child { border-bottom: none; }
 .ar-events .ar-ev-time { color: var(--text3); }
+
+/* ── Attendance QR scanner modal ── */
+.att-qr-reader { width: 100%; max-width: 360px; margin: 0 auto; }
+.att-qr-reader video { max-width: 100%; border-radius: 8px; }
